@@ -22,11 +22,22 @@ class StrategyGenome:
     min_spread_bps: int = 20
     min_volume_usd: float = 1000.0
     max_price: float = 0.95
+    max_hours: float = 48.0
 
-    # Order placement
-    bid_offset_bps: int = 5
-    ask_offset_bps: int = 5
-    post_both_sides: bool = True
+    # BTC Signal indicator params (used by BTCSignalGenerator)
+    rsi_period: int = 7
+    macd_fast: int = 6
+    macd_slow: int = 13
+    macd_signal: int = 5
+    bb_period: int = 10
+    bb_std: float = 2.0
+    sr_lookback: int = 20
+
+    # Signal scoring weights
+    rsi_weight: float = 1.0
+    macd_weight: float = 1.0
+    bb_weight: float = 1.0
+    sr_weight: float = 1.0
 
     # Position sizing
     max_position_pct: float = 0.10
@@ -38,11 +49,17 @@ class StrategyGenome:
     max_daily_loss_pct: float = 0.05
     max_positions: int = 5
     cancel_after_seconds: int = 300
+    min_confidence: float = 0.50
 
     # Market making
     fill_probability: float = 0.30
     spread_multiplier: float = 1.0
     rebate_capture_bps: int = 4
+
+    # Order placement
+    bid_offset_bps: int = 5
+    ask_offset_bps: int = 5
+    post_both_sides: bool = True
 
     # Simulation-specific
     taker_mode: bool = False
@@ -79,6 +96,7 @@ class StrategyGenome:
             ("min_spread_bps", 10, 100, 5),
             ("min_volume_usd", 500, 50000, 500),
             ("max_price", 0.80, 0.99, 0.01),
+            ("max_hours", 1.0, 200.0, 1.0),
             ("bid_offset_bps", 1, 50, 1),
             ("ask_offset_bps", 1, 50, 1),
             ("max_position_pct", 0.02, 0.30, 0.02),
@@ -91,6 +109,19 @@ class StrategyGenome:
             ("fill_probability", 0.05, 0.80, 0.05),
             ("spread_multiplier", 0.5, 3.0, 0.1),
             ("rebate_capture_bps", 1, 20, 1),
+            ("min_confidence", 0.30, 0.80, 0.05),
+            # BTC indicator params
+            ("rsi_period", 4, 21, 1),
+            ("macd_fast", 4, 20, 1),
+            ("macd_slow", 14, 30, 1),
+            ("macd_signal", 3, 15, 1),
+            ("bb_period", 5, 30, 1),
+            ("bb_std", 1.0, 3.0, 0.1),
+            ("sr_lookback", 10, 50, 5),
+            ("rsi_weight", 0.3, 2.0, 0.1),
+            ("macd_weight", 0.3, 2.0, 0.1),
+            ("bb_weight", 0.3, 2.0, 0.1),
+            ("sr_weight", 0.0, 1.5, 0.1),
         ]
 
         for attr, lo, hi, step in mutations:

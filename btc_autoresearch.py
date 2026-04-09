@@ -209,7 +209,7 @@ def main():
             current_score = new_score
             save_genome(mutated, new_score, source="autoresearch")
             log(
-                f"  🏆 KEEP — improved {current_score - new_score:.4f} → new best={new_score:.4f}"
+                f"  🏆 KEEP — improved +{new_score - current_score:.4f} → new best={new_score:.4f}"
             )
         else:
             status = "discard"
