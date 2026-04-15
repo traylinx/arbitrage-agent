@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-HARVEY_HOME = Path(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")))
+HARVEY_HOME = Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
 DATA_DIR = HARVEY_HOME / "data" / "arbitrage-agent" / "v2"
 STATE_DIR = DATA_DIR / "state"
 LOG_DIR = DATA_DIR / "logs"

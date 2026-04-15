@@ -13,7 +13,7 @@ import os
 import sys
 from datetime import datetime
 
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 LOG_FILE = os.path.join(HARVEY_HOME, "data", "logs", "sniper_heartbeat.log")
 PROCESS_NAME = "btc_5m_sniper.py --live"
 PYTHON_BIN = "/usr/local/opt/python@3.11/bin/python3.11"

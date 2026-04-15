@@ -9,7 +9,7 @@ tracking the best result across multiple simulations.
 import json, time, os, sys, subprocess, random
 from datetime import datetime, timezone
 
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 START_BUDGET = 100.0
 SIM_DURATION = 7200  # 2 hours in seconds
 RESULTS_FILE = os.path.join(HARVEY_HOME, "tmp", "autoresearch", "sniper_sim_results.json")

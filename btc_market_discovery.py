@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 DATA_DIR = (
-    Path(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")))
+    Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
     / "data"
     / "arbitrage-agent"
     / "v2"

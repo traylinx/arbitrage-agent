@@ -7,7 +7,7 @@ import os, sys, json, time, subprocess, random
 from datetime import datetime
 from pathlib import Path
 
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 DATA_DIR = Path(os.path.join(HARVEY_HOME, "data", "arbitrage-agent", "v2"))
 JOURNAL_FILE = DATA_DIR / "state" / "intraday_journal.jsonl"
 STATE_FILE = DATA_DIR / "state" / "intraday_trades.json"

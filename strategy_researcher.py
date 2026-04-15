@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 PAPER_CAPITAL = 100.0
 TAKER_FEE_BPS = 5.0
 SATS = 100000000
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 RESULTS_DIR = Path(os.path.join(HARVEY_HOME, "data", "arbitrage-agent", "v2", "state"))
 BEST_PARAMS_FILE = RESULTS_DIR / "best_intraday_params.json"
 

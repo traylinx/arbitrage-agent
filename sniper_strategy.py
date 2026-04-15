@@ -382,7 +382,7 @@ class SimEngine:
                     f"Δ${t['delta']:+8.2f} | c={t['conf']:.2f} | "
                     f"{'WIN' if t['won'] else 'LOSS'} ${t['pnl']:+7.2f}"
                 )
-        out = os.path.join(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")), "tmp", "autoresearch", "sniper_sim_results.json")
+        out = os.path.join(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")), "tmp", "autoresearch", "sniper_sim_results.json")
         result = {
             "duration": self.dur,
             "bankroll_start": self.starting,

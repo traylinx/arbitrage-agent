@@ -6,7 +6,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, OrderArgs
 from py_clob_client.order_builder.constants import BUY
 
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 ENV_PATH = os.path.join(HARVEY_HOME, "data", "arbitrage-agent", ".env.live")
 CANDIDATES_FILE = os.path.join(HARVEY_HOME, "data", "arbitrage-agent", "negrisk_opportunities.json")
 

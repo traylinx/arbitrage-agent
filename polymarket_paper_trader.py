@@ -147,7 +147,7 @@ def polymarket_signal(market: Market, history: PriceHistory, genome) -> str | No
     return None
 
 
-HARVEY_HOME = Path(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")))
+HARVEY_HOME = Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
 DATA_DIR = HARVEY_HOME / "data" / "arbitrage-agent" / "v2"
 STATE_FILE = DATA_DIR / "state" / "paper_trades.json"
 JOURNAL_FILE = DATA_DIR / "state" / "intraday_journal.jsonl"

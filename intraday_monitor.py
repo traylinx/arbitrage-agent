@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from polymarket_paper_trader import PolymarketPaperTrader
 from strategy_genome import StrategyGenome
 
-HARVEY_HOME = Path(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")))
+HARVEY_HOME = Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
 DATA_DIR = HARVEY_HOME / "data" / "arbitrage-agent" / "v2"
 STATE_DIR = DATA_DIR / "state"
 LOG_DIR = DATA_DIR / "logs"

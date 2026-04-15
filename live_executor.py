@@ -9,7 +9,7 @@ from py_clob_client.order_builder.constants import BUY
 # Harvey OS: Live Arbitrage Executor
 # WARNING: This script places REAL orders on Polymarket.
 
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 ENV_PATH = os.path.join(HARVEY_HOME, "data", "arbitrage-agent", ".env.live")
 MAX_TRADE_SIZE_USD = 5.00 # Safety Cap: Never spend more than $5 per side
 

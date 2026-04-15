@@ -1,9 +1,9 @@
 #!/bin/bash
 # sniper_monitor.sh — live dashboard of the BTC sniper
-# Usage: bash /Users/sebastian/HARVEY/agents/arbitrage-agent/sniper_monitor.sh
+# Usage: bash /Users/sebastian/MAKAKOO/agents/arbitrage-agent/sniper_monitor.sh
 
-LOG=/Users/sebastian/HARVEY/data/arbitrage-agent/v2/logs/btc_sniper_live.log
-PARAMS=/Users/sebastian/HARVEY/data/arbitrage-agent/v2/state/sniper_best_params.json
+LOG=/Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/logs/btc_sniper_live.log
+PARAMS=/Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/state/sniper_best_params.json
 
 while true; do
     clear

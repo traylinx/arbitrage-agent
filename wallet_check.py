@@ -7,7 +7,7 @@ from web3 import Web3
 
 # Harvey OS: Secure Wallet & API Check
 
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 ENV_PATH = os.path.join(HARVEY_HOME, "data", "arbitrage-agent", ".env.live")
 
 def check_and_arm_vault():

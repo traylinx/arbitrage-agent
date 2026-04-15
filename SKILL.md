@@ -48,7 +48,7 @@ agents/arbitrage-agent/
 
 ### Continuous Monitor (production daemon)
 ```bash
-cd ~/HARVEY/agents/arbitrage-agent
+cd ~/MAKAKOO/agents/arbitrage-agent
 nohup python3 intraday_monitor.py --capital 100 >> logs/intraday_monitor.log 2>&1 &
 ```
 Polls every 30s. Uses best evolved genome. Falls back to default params if none found.
@@ -60,7 +60,7 @@ python3 polymarket_paper_trader.py --capital 100 --poll 30
 
 ### Evolution (one generation = 12 mutants × 30min sessions = ~6 hours)
 ```bash
-cd ~/HARVEY/agents/arbitrage-agent
+cd ~/MAKAKOO/agents/arbitrage-agent
 python3 autoimprove_live.py
 ```
 Runs nightly at 5 AM via cron. Uses PolymarketPaperTrader + CryptoPriceScanner.
@@ -145,7 +145,7 @@ Typical Polymarket crypto markets:
 
 ## State & Data
 
-Runtime state in `~/HARVEY/data/arbitrage-agent/v2/`:
+Runtime state in `~/MAKAKOO/data/arbitrage-agent/v2/`:
 - `state/best_genome.json` — best evolved genome (score, timestamp)
 - `state/intraday_journal.jsonl` — all paper trades (net_pnl + pnl keys)
 - `logs/intraday_monitor.log` — continuous monitor output
@@ -167,10 +167,10 @@ Current status: **Paper trading only.** Bankroll is virtual.
 
 ```cron
 # Nightly evolution (5 AM) — one generation per night
-0 5 * * * cd ~/HARVEY/agents/arbitrage-agent && python3 autoimprove_live.py >> logs/autoimprove_live.log 2>&1
+0 5 * * * cd ~/MAKAKOO/agents/arbitrage-agent && python3 autoimprove_live.py >> logs/autoimprove_live.log 2>&1
 
 # Continuous intraday monitor (restart every 6h to pick up new genomes)
-*/10 * * * * pgrep -f intraday_monitor || (cd ~/HARVEY/agents/arbitrage-agent && nohup python3 intraday_monitor.py >> logs/intraday_monitor.log 2>&1)
+*/10 * * * * pgrep -f intraday_monitor || (cd ~/MAKAKOO/agents/arbitrage-agent && nohup python3 intraday_monitor.py >> logs/intraday_monitor.log 2>&1)
 ```
 
 ---

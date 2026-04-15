@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-HARVEY_ROOT = Path(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")))
+HARVEY_ROOT = Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
 TRADER_DIR = HARVEY_ROOT / "data" / "arbitrage-agent" / "v2"
 JOURNAL_FILE = TRADER_DIR / "state" / "intraday_journal.jsonl"
 BEST_PARAMS = TRADER_DIR / "state" / "best_intraday_params.json"

@@ -17,7 +17,7 @@ import random
 from datetime import datetime
 from pathlib import Path
 
-HARVEY_HOME = os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY"))
+HARVEY_HOME = os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO"))
 DATA_DIR = Path(HARVEY_HOME) / "data" / "arbitrage-agent" / "v2"
 STATE_FILE = DATA_DIR / "state" / "paper_trades.json"
 PARAMS_FILE = DATA_DIR / "state" / "best_intraday_params.json"

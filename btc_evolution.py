@@ -12,6 +12,7 @@ import argparse
 import copy
 import json
 import math
+import os
 import random
 import statistics
 import time
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import requests
 
-STATE_DIR = Path("/Users/sebastian/HARVEY/data/arbitrage-agent/v2/state")
+STATE_DIR = Path(os.environ.get("MAKAKOO_HOME", os.environ.get("HARVEY_HOME", "/Users/sebastian/MAKAKOO"))) / "data" / "arbitrage-agent" / "v2" / "state"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 BEST_GENOME_FILE = STATE_DIR / "btc_best_genome.json"
 EVOLUTION_LOG = STATE_DIR / "evolution_log.jsonl"

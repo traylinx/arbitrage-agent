@@ -758,7 +758,7 @@ class SimulationEngine:
             "blocked":      self.blocks,
             "trades":       self.trades,
         }
-        out_path = os.path.join(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")), "tmp", "autoresearch", "sniper_sim_results.json")
+        out_path = os.path.join(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")), "tmp", "autoresearch", "sniper_sim_results.json")
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2, default=str)
         print(f"\nResults saved to {out_path}")
