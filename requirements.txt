@@ -3,3 +3,5 @@ requests
 python-dotenv
 py-clob-client
 web3
+numpy
+scikit-learn

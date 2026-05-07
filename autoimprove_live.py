@@ -34,7 +34,7 @@ from typing import Optional
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-HARVEY_HOME = Path(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")))
+HARVEY_HOME = Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
 DATA_DIR = HARVEY_HOME / "data" / "arbitrage-agent" / "v2"
 STATE_DIR = DATA_DIR / "state"
 LOG_DIR = DATA_DIR / "logs"
@@ -53,7 +53,7 @@ AI_KEY = os.environ.get("SWITCHAI_KEY", "sk-test-123")
 AI_MODEL = os.environ.get("LLM_MODEL", "minimax:MiniMax-M2.7")
 
 POP_SIZE = int(os.environ.get("POP_SIZE", "16"))
-SESSION_MINUTES = int(os.environ.get("SESSION_MINUTES", "60"))
+SESSION_MINUTES = int(os.environ.get("SESSION_MINUTES", "30"))
 GENERATIONS_PER_RUN = int(os.environ.get("GENERATIONS_PER_RUN", "1"))
 PAPER_CAPITAL = float(os.environ.get("PAPER_CAPITAL", "100.0"))
 
@@ -736,9 +736,16 @@ class DirectionalPaperTrader:
             self._journal_trade(trade)
 
     def _score(self) -> dict:
-        """Score the genome's session performance."""
+        """
+        Score genome performance — WR FIRST, then volume, then PnL.
+
+        WR is the primary signal because:
+        - Polymarket 2% taker fee means WR < 50% = guaranteed losses over time
+        - A 60% WR with 2:1 win/loss ratio is massively profitable
+        - Even 55% WR with balanced wins/losses covers fees
+        """
         total = self.wins + self.losses + self.breakeven
-        wr = self.wins / max(total, 1)
+        wr = self.wins / max(total, 1) if total > 0 else 0.0
         pnl = self.capital - self.start_capital
         pnl_pct = pnl / self.start_capital
 
@@ -756,14 +763,41 @@ class DirectionalPaperTrader:
         else:
             sharpe = 0.0
 
-        # Combined score
-        score = (pnl_pct * 100) + (wr * 50) + (sharpe * 10)
+        # WR-first scoring: WR is 2x more important than PnL
+        # WR component: 0-100 (100 for perfect WR)
+        # PnL component: scaled so 10% PnL = 50 pts
+        # Trade volume: reward genomes that find 5+ quality trades
+        # Trade count penalty: < 3 trades is suspicious (over-fitting to 1-2 trades)
+        wr_score = wr * 100.0
+        pnl_score = max(pnl_pct, 0) * 500.0  # 5% PnL = 25 pts
+        sharpe_score = sharpe * 10.0
+        volume_bonus = min(total, 8) * 3.0  # reward up to 8 trades
+
+        # Penalty for too few trades (quality over quantity, but zero = suspicious)
+        if total < 3:
+            trade_penalty = (3 - total) * 8.0
+        else:
+            trade_penalty = 0.0
+
+        # Penalty for negative PnL (we want to win AND make money)
+        pnl_penalty = max(pnl, 0) * 0.0 - abs(min(pnl, 0)) * 5.0
+
+        score = (
+            wr_score
+            + pnl_score
+            + sharpe_score
+            + volume_bonus
+            - trade_penalty
+            + pnl_penalty
+        )
+        score = max(score, 0.0)  # floor at 0
 
         log(
             f"  [{self.genome.name}] SESSION DONE — "
             f"PnL=${pnl:+.4f} ({pnl_pct:+.2%}) WR={wr:.0%} Sharpe={sharpe:+.2f} "
             f"trades={total} W={self.wins} L={self.losses} B={self.breakeven} "
-            f"final_cap=${self.capital:.4f} score={score:.4f}"
+            f"final_cap=${self.capital:.4f} score={score:.4f} "
+            f"(WR={wr_score:.1f}+PnL={pnl_score:.1f}+Sharpe={sharpe_score:.1f}+Vol={volume_bonus:.1f})"
         )
 
         return {
@@ -833,7 +867,7 @@ class LiveDirectionalExecutor:
         )
 
         ENV_PATH = os.path.join(
-            os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")),
+            os.environ.get("HARVEY_HOME", os.path.expanduser("~/MAKAKOO")),
             "data",
             "arbitrage-agent",
             ".env.live",
@@ -1522,27 +1556,34 @@ class EvolutionEngine:
             zip(results, population), key=lambda x: x[0]["score"], reverse=True
         )
 
-        # Select elite
-        elite = [copy.deepcopy(g) for _, g in scored[:3]]
-        log(f"\n  TOP 3:")
+        # Select elite — WR must be > 0 to be considered
+        # Priority: high WR first, then by score
+        elite = [copy.deepcopy(g) for _, g in scored if _[0]["win_rate"] > 0][:5]
+        if len(elite) < 2:
+            log(f"  ⚠️  No genomes with WR > 0! Taking top 2 by score anyway.")
+            elite = [copy.deepcopy(g) for _, g in scored[:2]]
+
+        log(f"\n  TOP 3 by WR+Score:")
         for r, g in scored[:3]:
             log(
-                f"    {r['score']:+.4f} | PnL={r['pnl']:+.4f} WR={r['win_rate']:.0%} | {g.name}"
+                f"    {r['score']:+.4f} | PnL={r['pnl']:+.4f} WR={r['win_rate']:.0%} trades={r['trades']} | {g.name}"
             )
 
-        # Breed next population
+        # Breed next population — only from WR-positive genomes
         next_pop = list(elite)
         while len(next_pop) < len(population):
             if len(next_pop) < len(elite):
                 next_pop.append(copy.deepcopy(elite[len(next_pop)]))
             else:
-                a, b = random.sample(list(zip(results, population)), 2)
-                a_g, b_g = a[1], b[1]
-                parent_scores = [a[0]["score"], b[0]["score"]]
-                # Weighted toward better parents
-                winner = a_g if parent_scores[0] > parent_scores[1] else b_g
-                loser = b_g if winner is a_g else a_g
-                child = winner.crossover(winner, loser)
+                # Tournament selection: pick 3 random, breed best 2
+                contenders = random.sample(
+                    list(zip(results, population)), min(5, len(population))
+                )
+                sorted_contenders = sorted(
+                    contenders, key=lambda x: x[0]["score"], reverse=True
+                )
+                a_g, b_g = sorted_contenders[0][1], sorted_contenders[1][1]
+                child = a_g.crossover(a_g, b_g)
                 child = child.mutate(rate=0.20)
                 next_pop.append(child)
 

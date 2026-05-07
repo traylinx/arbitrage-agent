@@ -292,7 +292,7 @@ class LiveSimEngine:
                         poly_price = 0.50
 
                 spend = min(
-                    max(MIN_SPEND, self.bankroll * self.spend_ratio), self.max_bet
+                    max(MIN_SPEND, self.bankroll * self.spend_ratio), self.max_bet, 3.00
                 )
                 if spend > self.bankroll:
                     self.blocks += 1

@@ -156,6 +156,7 @@ LOG_DIR = DATA_DIR / "logs"
 TAKER_FEE_BPS = 200  # 2% taker fee (Polymarket standard)
 MAKER_REBATE_BPS = 50  # 0.5% maker rebate
 MIN_CAPITAL = 0.50
+MAX_TRADE_COST = 3.00  # HARD CAP: never risk more than $3 per trade
 
 
 @dataclass
@@ -362,7 +363,9 @@ class PolymarketPaperTrader:
 
                 fee = pos.cost * TAKER_FEE_BPS / 10000
                 net_pnl = gross_pnl - fee
-                self.capital += pos.shares * 1.0 + net_pnl
+                # Capital was already reduced by pos.cost when position opened.
+                # On settlement: add back payout minus fee.
+                self.capital += payout - fee
                 self.fees += fee
                 pnl = net_pnl  # alias for journal compatibility
 
@@ -458,7 +461,7 @@ class PolymarketPaperTrader:
                 continue
 
             side = sig.side
-            spend = self.capital * self.genome.max_position_pct
+            spend = min(self.capital * self.genome.max_position_pct, MAX_TRADE_COST)
             shares = max(1.0, spend / price)
             cost = shares * price
 
@@ -537,7 +540,7 @@ class PolymarketPaperTrader:
                     bid_price = mid - max(0.001, yes_p * 0.002)
                 bid_price = max(0.001, min(bid_price, mid - 0.001))
                 if bid_price > 0.001 and bid_price < yes_p:
-                    spend = self.capital * max_pos_pct
+                    spend = min(self.capital * max_pos_pct, MAX_TRADE_COST)
                     shares = max(1.0, spend / bid_price)
                     cost = shares * bid_price
                     if cost > 0 and cost <= self.capital * 0.45 and shares >= 1.0:
@@ -567,7 +570,7 @@ class PolymarketPaperTrader:
                     ask_price = mid + max(0.001, yes_p * 0.002)
                 ask_price = min(0.999, max(ask_price, mid + 0.001))
                 if ask_price > yes_p and ask_price < 0.999:
-                    spend = self.capital * max_pos_pct
+                    spend = min(self.capital * max_pos_pct, MAX_TRADE_COST)
                     shares = max(1.0, spend / ask_price)
                     cost = shares * ask_price
                     if cost > 0 and cost <= self.capital * 0.45 and shares >= 1.0:
@@ -665,6 +668,7 @@ class PolymarketPaperTrader:
                         )
 
                 self._open_orders_crypto(btc_price)
+                self._open_orders()
 
                 if tick % 10 == 0:
                     self._status()
@@ -725,13 +729,13 @@ if __name__ == "__main__":
         genome.bid_offset_bps = 10
         genome.ask_offset_bps = 10
         genome.fill_probability = 0.20
-        genome.max_positions = 5
+        genome.max_positions = 3        # 3 total, not spread across dozens of markets
         genome.post_both_sides = True
         genome.min_liquidity = 1000
         genome.min_spread_bps = 50
         genome.min_volume_usd = 5000
         genome.min_position_size = 3.0
-        genome.max_position_pct = 0.10
+        genome.max_position_pct = 0.25   # $5 per trade on $20 bankroll
         genome.cancel_after_seconds = 600
 
     PolymarketPaperTrader(genome, paper_capital=args.capital).run(poll=args.poll)

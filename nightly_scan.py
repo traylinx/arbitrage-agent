@@ -11,19 +11,20 @@ Cron: 0 2 * * * (2 AM daily)
 """
 
 import sys
+import os
 import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-HARVEY_ROOT = Path(os.environ.get("HARVEY_HOME", os.path.expanduser("~/HARVEY")))
+HARVEY_ROOT = Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
 DATA_DIR = HARVEY_ROOT / "data" / "arbitrage-agent"
 LOG_DIR = HARVEY_ROOT / "data" / "logs"
 BRAIN_BRIDGE = HARVEY_ROOT / "data" / "Brain" / "logseq_bridge.py"
 
 sys.path.insert(
     0,
-    str(HARVEY_ROOT / "harvey-os" / "skills" / "blockchain" / "polymarket" / "scripts"),
+    str(HARVEY_ROOT / "plugins" / "skill-blockchain-polymarket" / "src" / "scripts"),
 )
 
 
@@ -44,7 +45,7 @@ def run_polymarket_query(query: str) -> dict:
             sys.executable,
             str(
                 HARVEY_ROOT
-                / "harvey-os"
+                / "plugins" / "agent-arbitrage-agent" / "src"
                 / "skills"
                 / "blockchain"
                 / "polymarket"

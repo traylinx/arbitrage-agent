@@ -2,9 +2,9 @@
 # Cron wrapper for Polymarket Intraday Trader v2
 # Kills old instances before starting, uses venv Python, paper trading mode
 
-HARVEY_HOME="${HARVEY_HOME:-$HOME/HARVEY}"
-VENV_PYTHON="$HARVEY_HOME/arbitrage-research-agent/venv/bin/python"
-TRADER_DIR="$HARVEY_HOME/data/arbitrage-agent/v2"
+MAKAKOO_HOME="${HARVEY_HOME:-$HOME/HARVEY}"
+VENV_PYTHON="$MAKAKOO_HOME/arbitrage-research-agent/venv/bin/python"
+TRADER_DIR="$MAKAKOO_HOME/data/arbitrage-agent/v2"
 LOG_DIR="$TRADER_DIR/logs"
 
 mkdir -p "$LOG_DIR"

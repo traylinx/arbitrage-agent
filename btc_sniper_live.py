@@ -38,6 +38,7 @@ LOG_DIR = DATA_DIR / "logs"
 JOURNAL_FILE = STATE_DIR / "intraday_journal.jsonl"
 BEST_PARAMS_FILE = STATE_DIR / "sniper_best_params.json"
 FITNESS_HISTORY = DATA_DIR / "fitness_history.jsonl"
+PAPER_BALANCE_FILE = STATE_DIR / "sniper_paper_balance.json"
 
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -47,6 +48,7 @@ PAPER_CAPITAL = 100.0
 TAKER_FEE_BPS = 200  # 2%
 POLYFEE = 0.01
 MIN_SPEND = 2.50
+MAX_TRADE_COST = 3.00  # HARD CAP: never risk more than $3 per trade
 BINANCE_REST = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 POLYMARKET_CLOB = "https://clob.polymarket.com"
@@ -1092,16 +1094,27 @@ class LiveSniper:
             15: WindowState(15),
         }
         self._timeframes = [5, 15]
-        self._capital_split = {5: 0.60, 15: 0.40}
+        self._capital_split = {5: 0.75, 15: 0.25}  # 5m has 70% WR vs 15m 57% — allocate more to winner
 
         self._open_orders: dict[str, dict] = {}
         self._reconciled_orders: set[str] = set()
         self._pending_fills: dict[str, dict] = {}
         self._client: Optional[CLOBClient] = None
-        self._balance: float = PAPER_CAPITAL
+        # Load persisted paper balance so restarts don't wipe gains
+        if PAPER_BALANCE_FILE.exists():
+            try:
+                saved = json.loads(PAPER_BALANCE_FILE.read_text())
+                saved_bal = float(saved.get("balance", PAPER_CAPITAL))
+            except Exception:
+                saved_bal = PAPER_CAPITAL
+        else:
+            saved_bal = PAPER_CAPITAL
+        self._balance: float = saved_bal
+        self.bankroll = saved_bal
+        self.starting = PAPER_CAPITAL
         self._last_ga_evolve: float = 0.0
         self._balance_cache_time: float = 0.0
-        self._balance_cache: float = PAPER_CAPITAL
+        self._balance_cache: float = saved_bal
 
         self.lessons = LessonsLearned()
         self._total_deployed: float = 0.0
@@ -1124,6 +1137,8 @@ class LiveSniper:
 
     def _cap_for_tf(self, tf: int) -> float:
         available = self._balance - self._total_deployed
+        if available < MIN_SPEND * 2:
+            return 0.0
         cap = self._balance * self._capital_split[tf]
         return min(cap, available)
 
@@ -1353,17 +1368,21 @@ class LiveSniper:
             max(MIN_SPEND, cap * self.params.spend_ratio),
             cap * tier_max_bet_pct,
         )
-        spend = min(spend, cap * 0.95)
+        spend = min(spend, cap * 0.95, MAX_TRADE_COST)
         log(
             f"[DEBUG {tf}m] [{tier}] cap={cap:.2f} spend={spend:.2f} price={poly_price:.4f} "
             f"size={spend / poly_price:.2f} balance=${self._balance:.2f}"
         )
 
         size = spend / poly_price
-        min_shares = 5.0
+        min_shares = 3.0
         if size < min_shares:
             size = min_shares
         cost = size * poly_price
+        if cost > MAX_TRADE_COST:
+            size = MAX_TRADE_COST / poly_price
+            size = float(int(size * 100)) / 100
+            cost = size * poly_price
         if cost > cap * 0.95:
             size = cap * 0.95 / poly_price
             size = float(int(size * 100)) / 100
@@ -1581,6 +1600,13 @@ class LiveSniper:
             if self.live:
                 self._refresh_balance_with_retry()
                 self.bankroll = self._balance
+            else:
+                self._balance += pnl
+                self.bankroll = self._balance
+                try:
+                    PAPER_BALANCE_FILE.write_text(json.dumps({"balance": self._balance}))
+                except Exception:
+                    pass
             log(
                 f"[RECONCILE] Created+resolved trade {order_id[:16]}... won={won} pnl=${pnl:+.4f}"
             )
@@ -1620,6 +1646,14 @@ class LiveSniper:
         if self.live:
             self._refresh_balance_with_retry()
             self.bankroll = self._balance
+        else:
+            # Sim mode: track virtual bankroll
+            self._balance += pnl
+            self.bankroll = self._balance
+            try:
+                PAPER_BALANCE_FILE.write_text(json.dumps({"balance": self._balance}))
+            except Exception:
+                pass
 
         result_emoji = "🟢" if won else "🔴"
         log(
@@ -2099,19 +2133,21 @@ Return JSON:
                 try:
                     with open(JOURNAL_FILE) as f:
                         lines = f.readlines()
-                    for line in lines[-200:]:
+                    for line in lines[-500:]:
                         try:
-                            recent.append(json.loads(line))
+                            t = json.loads(line)
+                            if isinstance(t, dict) and "btc_delta" in t:
+                                recent.append(t)
                         except:
                             pass
                 except:
                     pass
 
-                wins = [t for t in recent if isinstance(t, dict) and t.get("won")]
-                losses = [t for t in recent if isinstance(t, dict) and not t.get("won")]
+                wins = [t for t in recent if t.get("won")]
+                losses = [t for t in recent if not t.get("won")]
                 total = wins + losses
                 if len(total) < 5:
-                    log(f"[GA] Waiting for more trades ({len(total)}/5)")
+                    log(f"[GA] Waiting for more BTC trades ({len(total)}/5)")
                     return
 
                 ga = SniperGA()
@@ -2156,16 +2192,17 @@ Return JSON:
         t.start()
 
     def _hour_adjust_conf(self, base_conf: float, direction: str, hour: int) -> float:
-        """Adjust conf based on UTC hour directional bias from 260+ BTC trades.
+        """Adjust conf based on UTC hour directional bias from live journal data.
 
-        Hard blocks: UTC 21 (both bad), UTC 05 (both bad), UTC 17 DOWN (WR=10%), UTC 20 UP (WR=14%)
-        Penalties: UTC 12 UP by 0.30, UTC 04 DOWN by 0.30
-        Boosts (+0.20): UP at UTC 01,11,13,15,16,17,18,19,22 | DOWN at UTC 00,09,12,14,20,23,01,11,13
+        Updated from 336-trade analysis (Apr 27 2026):
+        Hard blocks: UTC 21 (both bad), UTC 05 (both bad), UTC 17 DOWN (10% WR), UTC 20 UP (14% WR)
+        Penalties: UTC 12 UP (44% WR), UTC 04 DOWN (25% WR), UTC 13 DOWN (44% WR)
+        Boosts (+0.20): UP at 08,09,10,11,15,17,18,19,22 | DOWN at 00,09,12,14,20,23
         """
         CONFLICT_DOWN = {17}
         CONFLICT_UP = {20}
         PENALIZE_UP = {12}
-        PENALIZE_DOWN = {4}
+        PENALIZE_DOWN = {4, 13}  # 13 Down added: 44% WR from journal
         SKIP_ALL = {21, 5}
 
         if hour in SKIP_ALL:
@@ -2183,9 +2220,11 @@ Return JSON:
             penalty = 0.30
 
         boost = 0.0
-        if direction == "Up" and hour in {1, 11, 13, 15, 16, 17, 18, 19, 22}:
+        # Up boosts: 08(89%), 09(100%), 10(86%), 11(73%), 15(80%), 17(88%), 18(69%), 19(100%), 22(100%)
+        if direction == "Up" and hour in {8, 9, 10, 11, 15, 17, 18, 19, 22}:
             boost = 0.20
-        if direction == "Down" and hour in {0, 9, 12, 14, 20, 23, 1, 11, 13}:
+        # Down boosts: 00(80%), 09(64% borderline), 12(90%), 14(88%), 20(100%), 23(80%)
+        if direction == "Down" and hour in {0, 9, 12, 14, 20, 23}:
             boost = 0.20
 
         return max(0.0, base_conf - penalty + boost)
@@ -2198,7 +2237,7 @@ Return JSON:
         CONFLICT_DOWN = {17}
         CONFLICT_UP = {20}
         PENALIZE_UP = {12}
-        PENALIZE_DOWN = {4}
+        PENALIZE_DOWN = {4, 13}  # synced with _hour_adjust_conf
         SKIP_ALL = {21, 5}
 
         fired = 0
@@ -2229,9 +2268,9 @@ Return JSON:
                 penalty = 0.30
 
             boost = 0.0
-            if direction == "Up" and hr in {1, 11, 13, 15, 16, 17, 18, 19, 22}:
+            if direction == "Up" and hr in {8, 9, 10, 11, 15, 17, 18, 19, 22}:
                 boost = 0.20
-            if direction == "Down" and hr in {0, 9, 12, 14, 20, 23, 1, 11, 13}:
+            if direction == "Down" and hr in {0, 9, 12, 14, 20, 23}:
                 boost = 0.20
 
             conf = max(0.0, base_conf - penalty + boost)
@@ -2438,6 +2477,31 @@ Suggest 3 param changes. Return JSON: {{"suggestions": [{{"param": "...", "curre
         log(f"Saved best params: {self.best_params.name} score={self.best_score:.4f}")
 
 
+
+
+def assert_live_go_gate() -> None:
+    """Hard block real-money mode unless the mechanical CLOB-only gate passes."""
+    if os.environ.get("BTC_LIVE_DISABLE_GO_GATE", "0") == "1":
+        raise SystemExit("LIVE BLOCKED: BTC_LIVE_DISABLE_GO_GATE override is disabled on purpose. Do not bypass gates.")
+    gate = Path(__file__).with_name("btc_live_go_nogo.py")
+    cmd = [sys.executable, str(gate), "--json"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        log("LIVE BLOCKED: btc_live_go_nogo.py returned NO_GO")
+        if result.stdout:
+            log(result.stdout.strip()[-1200:])
+        raise SystemExit("LIVE BLOCKED: paper CLOB-only GO/NO-GO gates failed")
+    try:
+        report = json.loads(result.stdout)
+    except Exception as exc:
+        raise SystemExit(f"LIVE BLOCKED: invalid GO/NO-GO report: {exc}")
+    if report.get("verdict") != "GO_CANARY":
+        raise SystemExit(f"LIVE BLOCKED: verdict={report.get('verdict')}")
+    ack = os.environ.get("BTC_LIVE_CANARY_ACK")
+    if ack != "I_ACCEPT_CANARY_RISK_MAX_5_USDC":
+        raise SystemExit("LIVE BLOCKED: set BTC_LIVE_CANARY_ACK=I_ACCEPT_CANARY_RISK_MAX_5_USDC after reviewing GO_CANARY")
+    log("LIVE CANARY GATE PASSED: $5 wallet cap / $1 order cap only")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     import argparse
@@ -2452,6 +2516,8 @@ def main():
     args = parser.parse_args()
 
     live = args.live and not args.paper
+    if live:
+        assert_live_go_gate()
 
     ga = SniperGA()
 

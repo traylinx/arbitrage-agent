@@ -2,10 +2,10 @@
 # Nightly Strategy Research — genetic optimization for Polymarket trader
 # Uses strategy_researcher.py to find best params
 
-HARVEY_HOME="${HARVEY_HOME:-$HOME/HARVEY}"
+MAKAKOO_HOME="${HARVEY_HOME:-$HOME/HARVEY}"
 PYTHON="/usr/local/opt/python@3.11/bin/python3.11"
-SCRIPT_DIR="$HARVEY_HOME/harvey-os/skills/arbitrage-agent"
-LOG_DIR="$HARVEY_HOME/data/logs"
+SCRIPT_DIR="$MAKAKOO_HOME/skills-shared/harvey/arbitrage-agent"
+LOG_DIR="$MAKAKOO_HOME/data/logs"
 
 mkdir -p "$LOG_DIR"
 

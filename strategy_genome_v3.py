@@ -19,40 +19,39 @@ class StrategyGenome:
     version: str = "v3.0"
     name: str = ""
 
-    # BTC momentum thresholds — reasonable for 15m timeframe
-    bull_threshold: float = 0.10  # % BTC mom to be BULL (buy YES)
-    bear_threshold: float = -0.10  # % BTC mom to be BEAR (buy NO)
+    # BTC momentum thresholds — entry when BTC moves these % on 15m
+    bull_threshold: float = 0.05  # % BTC mom to trigger BULL signal
+    bear_threshold: float = -0.05  # % BTC mom to trigger BEAR signal
 
-    # PM momentum threshold (secondary confirmation, CLOB has 30s cache)
-    pm_bull_threshold: float = 0.001  # YES price rising → BUY YES
-    pm_bear_threshold: float = -0.001  # YES price falling → BUY NO
+    # PM momentum confirmation (YES price delta per minute)
+    pm_bull_threshold: float = 0.001  # YES price rising → confirm BULL
+    pm_bear_threshold: float = -0.001  # YES price falling → confirm BEAR
 
-    # Confidence scaling
+    # Confidence — min_entry_conf gates whether to take a signal
     base_confidence: float = 0.55
     max_confidence: float = 0.85
-    min_confidence: float = 0.40  # lower min for BTC-leading entries
-    conf_per_bps_mom: float = 0.010
+    min_confidence: float = 0.50  # only enter if conf >= this
 
-    # Timeframe
-    primary_timeframe: str = "15m"  # 15m for clearer signals
+    # BTC timeframe weights (composite momentum)
+    primary_timeframe: str = "15m"
     use_composite_momentum: bool = False
     btc_weight_1m: float = 0.0
     btc_weight_5m: float = 0.30
     btc_weight_15m: float = 0.40
     btc_weight_1h: float = 0.30
 
-    # BTC as filter
-    use_btc_filter: bool = False
-    btc_filter_threshold: float = 1.0
+    # BTC as filter — skip entries when 1h opposes
+    use_btc_filter: bool = True
+    btc_filter_threshold: float = 0.5
     btc_bear_multiplier: float = 0.50
 
-    # Entry filters
-    min_volume_24h: float = 30000  # higher min volume
-    max_entry_price: float = 0.75
+    # Market filters
+    min_volume_24h: float = 40000  # only trade high-volume markets
+    max_entry_price: float = 0.70
     min_entry_price: float = 0.05
 
-    # RSI filter
-    use_rsi_filter: bool = False
+    # RSI filter (BTC)
+    use_rsi_filter: bool = True
     rsi_overbought: float = 70
     rsi_oversold: float = 30
 
@@ -61,20 +60,25 @@ class StrategyGenome:
     rsi_reversion_buy_threshold: float = 30
     rsi_reversion_sell_threshold: float = 70
 
-    # Position sizing — MORE CONSERVATIVE
-    max_position_pct: float = 0.08  # 8% per trade (was 10%)
-    min_position_pct: float = 0.03
-    max_positions: int = 2  # max 2 concurrent (was 3)
-    kelly_fraction: float = 0.20
+    # Position sizing
+    max_position_pct: float = (
+        0.15  # 15% of capital per trade (bigger = fees matter less)
+    )
+    min_position_pct: float = 0.05  # minimum to make fees worthwhile
+    max_positions: int = 2  # max 2 concurrent
+    kelly_fraction: float = 0.25
 
-    # Exit rules — tighter for illiquid PM
-    profit_target_pct: float = 0.04  # 4% — reasonable for PM moves
-    stop_loss_pct: float = 0.03  # 3% — cut losses fast
+    # Exit rules — wider for PM (moves 3-10% in a few minutes)
+    profit_target_pct: float = 0.06  # 6% target — covers fees + profit
+    stop_loss_pct: float = 0.04  # 4% max loss
     max_hold_hours: float = 2.0  # force exit after 2h
 
-    # Poll / session
-    poll_seconds: int = 10  # faster polling
-    session_minutes: int = 60
+    # Session / polling
+    poll_seconds: int = 10
+    session_minutes: int = 30  # 30min sessions — need time to get trades
+
+    # Minimum trade bar — genomes below this are penalized
+    min_trades_per_session: int = 3
 
     def __post_init__(self):
         if not self.name:
@@ -103,35 +107,32 @@ class StrategyGenome:
         )
 
         mutations = [
-            ("bull_threshold", 0.05, 0.25, 0.02),
-            ("bear_threshold", -0.25, -0.05, 0.02),
-            ("pm_bull_threshold", 0.0005, 0.004, 0.0005),
-            ("pm_bear_threshold", -0.004, -0.0005, 0.0005),
-            ("base_confidence", 0.50, 0.70, 0.05),
+            ("bull_threshold", 0.02, 0.20, 0.01),
+            ("bear_threshold", -0.20, -0.02, 0.01),
+            ("pm_bull_threshold", 0.0002, 0.005, 0.0002),
+            ("pm_bear_threshold", -0.005, -0.0002, 0.0002),
+            ("base_confidence", 0.45, 0.75, 0.05),
             ("max_confidence", 0.70, 0.95, 0.05),
-            ("min_confidence", 0.35, 0.50, 0.05),
-            ("conf_per_bps_mom", 0.005, 0.040, 0.005),
+            ("min_confidence", 0.30, 0.60, 0.05),
             ("btc_weight_1m", 0.0, 0.5, 0.05),
             ("btc_weight_5m", 0.0, 0.5, 0.05),
             ("btc_weight_15m", 0.0, 0.5, 0.05),
             ("btc_weight_1h", 0.0, 0.5, 0.05),
-            ("btc_filter_threshold", 0.5, 2.0, 0.10),
+            ("btc_filter_threshold", 0.2, 2.0, 0.10),
             ("btc_bear_multiplier", 0.1, 1.0, 0.05),
-            ("min_volume_24h", 20000, 100000, 10000),
-            ("max_entry_price", 0.50, 0.90, 0.02),
-            ("min_entry_price", 0.02, 0.20, 0.02),
+            ("min_volume_24h", 20000, 100000, 5000),
+            ("max_entry_price", 0.40, 0.90, 0.02),
+            ("min_entry_price", 0.02, 0.30, 0.02),
             ("rsi_overbought", 60, 85, 2),
-            ("rsi_oversold", 15, 40, 2),
-            ("rsi_reversion_buy_threshold", 20, 40, 1),
-            ("rsi_reversion_sell_threshold", 60, 80, 1),
-            ("max_position_pct", 0.05, 0.15, 0.02),
-            ("min_position_pct", 0.02, 0.08, 0.01),
+            ("rsi_oversold", 15, 45, 2),
+            ("max_position_pct", 0.08, 0.25, 0.02),
+            ("min_position_pct", 0.03, 0.15, 0.01),
             ("max_positions", 1, 3, 1),
-            ("kelly_fraction", 0.10, 0.40, 0.05),
-            ("profit_target_pct", 0.02, 0.10, 0.01),
+            ("kelly_fraction", 0.10, 0.50, 0.05),
+            ("profit_target_pct", 0.03, 0.15, 0.01),
             ("stop_loss_pct", 0.02, 0.08, 0.01),
             ("max_hold_hours", 0.5, 4.0, 0.5),
-            ("poll_seconds", 5, 30, 5),
+            ("poll_seconds", 5, 60, 5),
         ]
 
         for attr, lo, hi, step in mutations:
