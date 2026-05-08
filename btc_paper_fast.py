@@ -7,8 +7,8 @@ Fires on delta>=8 (79% WR historically) and conf>=0.4 to collect data fast.
 Logs every trade to intraday_journal.jsonl for GA analysis.
 """
 
-import copy, json, math, os, random, signal, sys, time, requests, threading
-from collections import defaultdict
+import argparse, copy, json, math, os, random, signal, sys, time, requests, threading
+from collections import Counter, defaultdict
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -37,16 +37,61 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(os.path.expanduser(os.environ.get(name, str(default))))
 
 
+def _safe_slug(raw: str) -> str:
+    out = []
+    for ch in str(raw or ""):
+        if ch.isalnum() or ch in ("-", "_"):
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip("_") or "btc-agent"
+
+
+def parse_timeframes(raw) -> list[int]:
+    """Parse isolated agent timeframe config.
+
+    Accepts "5", "15", "5,15", "5m,15m", [5], [5, 15].
+    Anything else is a config error: BTC markets here are only 5m/15m.
+    """
+    if raw is None or raw == "":
+        parts = ["5", "15"]
+    elif isinstance(raw, (list, tuple, set)):
+        parts = list(raw)
+    else:
+        parts = [p.strip() for p in str(raw).replace(";", ",").split(",") if p.strip()]
+
+    out: list[int] = []
+    for part in parts:
+        token = str(part).strip().lower().removesuffix("m")
+        try:
+            tf = int(token)
+        except ValueError as exc:
+            raise ValueError(f"invalid BTC timeframe {part!r}; expected 5 or 15") from exc
+        if tf not in (5, 15):
+            raise ValueError(f"invalid BTC timeframe {tf}; expected 5 or 15")
+        if tf not in out:
+            out.append(tf)
+    if not out:
+        raise ValueError("at least one BTC timeframe required")
+    return out
+
+
 LOG_DIR = _env_path("BTC_LOG_DIR", DATA_DIR / "logs")
 JOURNAL_FILE = _env_path("BTC_JOURNAL_FILE", STATE_DIR / "intraday_journal.jsonl")
-BEST_PARAMS_FILE = _env_path("BTC_BEST_PARAMS_FILE", STATE_DIR / "sniper_best_params.json")
+DEFAULT_BEST_PARAMS_FILE = STATE_DIR / "sniper_best_params.json"
+BEST_PARAMS_FILE = _env_path("BTC_BEST_PARAMS_FILE", DEFAULT_BEST_PARAMS_FILE)
 PAPER_LOG_FILE = _env_path("BTC_PAPER_LOG_FILE", LOG_DIR / "btc_sniper_paper_fast.log")
 PROB_MODEL_PATH = _env_path("BTC_PROB_MODEL_PATH", DATA_DIR / "model" / "btc_prob_model_current.pkl")
 STRATEGY_NAME = os.environ.get("BTC_STRATEGY_NAME", "main")
+AGENT_ID = os.environ.get("BTC_AGENT_ID", STRATEGY_NAME or "btc-combined")
+ACTIVE_TIMEFRAMES = parse_timeframes(os.environ.get("BTC_TIMEFRAMES", "5,15"))
 DISABLE_PARAM_RELOAD = os.environ.get("BTC_DISABLE_PARAM_RELOAD", "0") == "1"
 PARAM_OVERRIDES_JSON = os.environ.get("BTC_PARAM_OVERRIDES_JSON", "")
+INCLUDE_LIVE_TRAINING = os.environ.get("BTC_INCLUDE_LIVE_TRAINING", "0") == "1"
+LIVE_TRADE_WEIGHT = float(os.environ.get("BTC_LIVE_TRADE_WEIGHT", "1.0"))
 PAPER_CAPITAL = float(os.environ.get("BTC_PAPER_CAPITAL", "100.0"))
-MIN_SPEND = 2.50
+MIN_SPEND = float(os.environ.get("BTC_MIN_SPEND", "2.50"))
+MAX_TRADE_COST = float(os.environ.get("BTC_MAX_TRADE_COST", "3.00"))
 MAX_OPEN_BTC_TRADES = int(os.environ.get("BTC_MAX_OPEN_BTC_TRADES", "1"))
 MAX_OPEN_BTC_TRADES_PER_TF = int(os.environ.get("BTC_MAX_OPEN_BTC_TRADES_PER_TF", "0"))
 ALLOW_CROSS_TF_CORRELATED_OPEN = os.environ.get("BTC_ALLOW_CROSS_TF_CORRELATED_OPEN", "0") == "1"
@@ -119,7 +164,14 @@ PAPER_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 def log(msg: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    prefix = f"[{STRATEGY_NAME}] " if STRATEGY_NAME else ""
+    if AGENT_ID and STRATEGY_NAME and AGENT_ID != STRATEGY_NAME:
+        prefix = f"[{AGENT_ID}/{STRATEGY_NAME}] "
+    elif AGENT_ID:
+        prefix = f"[{AGENT_ID}] "
+    elif STRATEGY_NAME:
+        prefix = f"[{STRATEGY_NAME}] "
+    else:
+        prefix = ""
     line = f"[{ts}] {prefix}{msg}"
     try:
         print(line, flush=True)
@@ -683,16 +735,21 @@ def fast_ga_would_fire(trade: dict, params: SniperParams) -> bool:
 
 # ── Fast GA ────────────────────────────────────────────────────────────────
 class FastGA:
-    def __init__(self):
+    def __init__(self, timeframes=None, include_live: bool | None = None, live_weight: float | None = None):
         self.best_params = SniperParams()
         self.best_score = float("-inf")
         self.population = []
+        self.timeframes = set(parse_timeframes(timeframes or ACTIVE_TIMEFRAMES))
+        self.include_live = INCLUDE_LIVE_TRAINING if include_live is None else bool(include_live)
+        self.live_weight = LIVE_TRADE_WEIGHT if live_weight is None else float(live_weight)
 
     def run(self, journal_file, generations=20, session_min=5):
         log("### FAST GA STARTING ###")
-        # Load paper trades as baseline
+        # Load resolved paper trades by default; optionally include resolved live fills.
         trades = self._load_trades(journal_file)
-        log(f"Loaded {len(trades)} paper trades for GA")
+        mode_counts = Counter(t.get("mode") or "unknown" for t in trades)
+        mode_summary = ", ".join(f"{mode}={count}" for mode, count in sorted(mode_counts.items())) or "none"
+        log(f"Loaded {len(trades)} trades for GA ({mode_summary}; include_live={self.include_live})")
 
         # Start with proven good params
         base = SniperParams(
@@ -752,7 +809,28 @@ class FastGA:
                         pass
         except:
             pass
-        return [t for t in trades if t.get("mode") == "paper"]
+        out = []
+        allowed_modes = {"paper"}
+        if self.include_live:
+            allowed_modes.add("live")
+        for t in trades:
+            if t.get("mode") not in allowed_modes:
+                continue
+            if t.get("won") is None or t.get("pnl") is None:
+                continue
+            try:
+                tf = int(t.get("window_tf") or 0)
+            except Exception:
+                tf = 0
+            if self.timeframes and tf not in self.timeframes:
+                continue
+            out.append(t)
+        return out
+
+    def _trade_weight(self, trade: dict) -> float:
+        if trade.get("mode") == "live":
+            return max(0.0, float(self.live_weight))
+        return 1.0
 
     def _score_params(self, params, trades):
         if not trades:
@@ -760,10 +838,14 @@ class FastGA:
         eligible = [t for t in trades if fast_ga_would_fire(t, params)]
         if not eligible:
             return -50.0
-        wins = sum(1 for t in eligible if t.get("won"))
-        wr = wins / len(eligible)
-        pnl = sum(journal_trade_pnl(t) for t in eligible)
-        pnls = [journal_trade_pnl(t) for t in eligible]
+        weights = [self._trade_weight(t) for t in eligible]
+        sample_n = sum(weights)
+        if sample_n <= 0:
+            return -50.0
+        wins = sum(w for t, w in zip(eligible, weights) if t.get("won"))
+        wr = wins / sample_n
+        pnl = sum(journal_trade_pnl(t) * w for t, w in zip(eligible, weights))
+        pnls = [journal_trade_pnl(t) * w for t, w in zip(eligible, weights)]
         mean_pnl = sum(pnls) / len(pnls)
         if len(pnls) > 1:
             var = sum((x - mean_pnl) ** 2 for x in pnls) / (len(pnls) - 1)
@@ -775,15 +857,15 @@ class FastGA:
         # Same shape as btc_backtest_autoresearch: money first, WR quality,
         # per-trade normalization, and a hard penalty for low sample/low WR.
         penalty = 0.0
-        if len(eligible) < 15:
-            penalty += (15 - len(eligible)) * 5.0
+        if sample_n < 15:
+            penalty += (15 - sample_n) * 5.0
         if wr < 0.60:
             penalty += 200.0
         score = (
             pnl * 0.5
             + wr * 30.0
             + sharpe_like * 5.0
-            + math.log(1 + len(eligible)) * 2.0
+            + math.log(1 + sample_n) * 2.0
             - penalty
         )
         return score
@@ -794,7 +876,7 @@ class FastGA:
             d.update({
                 "best_score": self.best_score,
                 "generation": int(time.time()),
-                "source": "btc_paper_fast.FastGA",
+                "source": f"btc_paper_fast.FastGA:{AGENT_ID}:{','.join(str(x) for x in sorted(self.timeframes))}m",
                 "strategy_version": STRATEGY_VERSION,
             })
             with params_file_lock(BEST_PARAMS_FILE):
@@ -811,8 +893,10 @@ class FastGA:
 
 # ── Paper Trader ────────────────────────────────────────────────────────────
 class PaperTrader:
-    def __init__(self, params=None):
+    def __init__(self, params=None, timeframes=None, agent_id: str | None = None):
         self.params = params or SniperParams()
+        self.agent_id = agent_id or AGENT_ID
+        self.timeframes = parse_timeframes(timeframes or ACTIVE_TIMEFRAMES)
         self.live = False
         self.bankroll = PAPER_CAPITAL
         self._balance = PAPER_CAPITAL
@@ -837,8 +921,8 @@ class PaperTrader:
             hard_poly_cap=PROB_HARD_POLY_CAP,
         )
         self.windows = {
-            5: {"start": 0, "price": 0, "traded": False, "market_id": None, "market": None},
-            15: {"start": 0, "price": 0, "traded": False, "market_id": None, "market": None},
+            tf: {"start": 0, "price": 0, "traded": False, "market_id": None, "market": None}
+            for tf in self.timeframes
         }
         self.trades = []
         self.running = True
@@ -857,7 +941,7 @@ class PaperTrader:
             if gen == self._params_generation:
                 return
             candidate = SniperParams.from_dict(d)
-            self.params = candidate
+            self.params = apply_param_overrides(candidate)
             self._params_generation = gen
             log(
                 f"[GA] Loaded params: delta={self.params.delta_thresh:.1f} conf={self.params.conf_thresh:.2f} ens={self.params.ens_thresh:.2f}"
@@ -867,10 +951,11 @@ class PaperTrader:
 
     def run(self, duration=28800):
         log(
-            f"Starting PAPER sniper: delta>={self.params.delta_thresh}, conf>={self.params.conf_thresh}"
+            f"Starting PAPER sniper agent={self.agent_id} timeframes={','.join(str(tf)+'m' for tf in self.timeframes)} "
+            f"delta>={self.params.delta_thresh}, conf>={self.params.conf_thresh}"
         )
         signal.signal(signal.SIGINT, lambda s, f: setattr(self, "running", False))
-        last_market_check = {5: 0, 15: 0}
+        last_market_check = {tf: 0 for tf in self.timeframes}
         last_status = 0
         last_btc = 0
         last_param_reload = 0
@@ -891,8 +976,10 @@ class PaperTrader:
                 self.se_15m.update(btc)
                 last_btc = btc
 
-            # Check signals every second for each timeframe
-            for tf in [5, 15]:
+            # Check signals every second for each configured timeframe.
+            # Split-agent mode runs exactly one tf per process; combined mode
+            # still supports [5, 15] for backward compatibility.
+            for tf in self.timeframes:
                 if now - last_market_check.get(tf, 0) < MARKET_CHECK_SECONDS:
                     continue
                 win = self.windows[tf]
@@ -1523,7 +1610,7 @@ class PaperTrader:
                 f"< min_spend=${MIN_SPEND:.2f} total_exposure_cap={total_exposure_pct:.0%}",
             )
             return None
-        spend = min(self._balance * self.params.spend_ratio, 3.00, max_spend)
+        spend = min(self._balance * self.params.spend_ratio, MAX_TRADE_COST, max_spend)
         if sig.get("_exploration_mode"):
             spend = min(spend, max(MIN_SPEND, PAPER_EXPLORATION_MAX_SPEND))
 
@@ -1877,6 +1964,7 @@ class PaperTrader:
         try:
             d = {
                 "mode": "paper",
+                "agent_id": self.agent_id,
                 "strategy": STRATEGY_NAME,
                 "params": self.params.to_dict(),
                 "window_start": t["window_start"],
@@ -1915,14 +2003,101 @@ class PaperTrader:
 def continuous_ga_loop():
     while True:
         try:
-            FastGA().run(JOURNAL_FILE, generations=8, session_min=5)
+            FastGA(timeframes=ACTIVE_TIMEFRAMES).run(JOURNAL_FILE, generations=8, session_min=5)
         except Exception as e:
             log(f"[GA] Continuous loop error: {e}")
         time.sleep(300)
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="BTC 5m/15m paper sniper")
+    parser.add_argument("duration_pos", nargs="?", type=int, help="run duration in seconds (legacy positional)")
+    parser.add_argument("--duration", type=int, default=None, help="run duration in seconds")
+    parser.add_argument("--timeframes", default=None, help="comma-separated subset: 5, 15, or 5,15")
+    parser.add_argument("--agent-id", default=None, help="stable process id, e.g. btc-5m or btc-15m")
+    parser.add_argument("--capital", type=float, default=None, help="paper bankroll for this isolated process")
+    parser.add_argument("--best-params-file", default=None, help="agent-specific params JSON")
+    parser.add_argument("--log-file", default=None, help="agent-specific trader log")
+    parser.add_argument("--journal-file", default=None, help="paper journal file")
+    parser.add_argument("--include-live-training", action="store_true", help="include resolved live trades in FastGA training")
+    parser.add_argument("--live-trade-weight", type=float, default=None, help="weight for live rows in FastGA scoring")
+    # Process-owner markers used by launchers/watchdogs; parsed so argparse does
+    # not reject existing calls: `btc_paper_fast.py 21600 --watchdog-main`.
+    parser.add_argument("--watchdog-main", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--parallel-lab", action="store_true", help=argparse.SUPPRESS)
+    return parser.parse_args(argv)
+
+
+def _default_params_path_for_agent(agent_id: str, timeframes: list[int]) -> Path:
+    if len(timeframes) == 1:
+        return STATE_DIR / f"sniper_best_params_{timeframes[0]}m.json"
+    return STATE_DIR / f"sniper_best_params_{_safe_slug(agent_id)}.json"
+
+
+def configure_runtime(args) -> int:
+    """Apply CLI split-agent config to module globals before starting threads."""
+    global AGENT_ID, ACTIVE_TIMEFRAMES, PAPER_CAPITAL, BEST_PARAMS_FILE, PAPER_LOG_FILE, JOURNAL_FILE
+    global INCLUDE_LIVE_TRAINING, LIVE_TRADE_WEIGHT
+
+    duration = args.duration if args.duration is not None else args.duration_pos
+    duration = duration if duration is not None else 28800
+
+    if args.timeframes is not None:
+        ACTIVE_TIMEFRAMES = parse_timeframes(args.timeframes)
+        os.environ["BTC_TIMEFRAMES"] = ",".join(str(tf) for tf in ACTIVE_TIMEFRAMES)
+
+    if args.agent_id:
+        AGENT_ID = args.agent_id
+        os.environ["BTC_AGENT_ID"] = AGENT_ID
+
+    if args.capital is not None:
+        PAPER_CAPITAL = float(args.capital)
+        os.environ["BTC_PAPER_CAPITAL"] = str(PAPER_CAPITAL)
+
+    if args.journal_file:
+        JOURNAL_FILE = Path(os.path.expanduser(args.journal_file))
+        os.environ["BTC_JOURNAL_FILE"] = str(JOURNAL_FILE)
+
+    if args.include_live_training:
+        INCLUDE_LIVE_TRAINING = True
+        os.environ["BTC_INCLUDE_LIVE_TRAINING"] = "1"
+    if args.live_trade_weight is not None:
+        LIVE_TRADE_WEIGHT = float(args.live_trade_weight)
+        os.environ["BTC_LIVE_TRADE_WEIGHT"] = str(LIVE_TRADE_WEIGHT)
+
+    env_params_explicit = bool(os.environ.get("BTC_BEST_PARAMS_FILE"))
+    if args.best_params_file:
+        BEST_PARAMS_FILE = Path(os.path.expanduser(args.best_params_file))
+        os.environ["BTC_BEST_PARAMS_FILE"] = str(BEST_PARAMS_FILE)
+    elif not env_params_explicit and (args.agent_id or args.timeframes):
+        BEST_PARAMS_FILE = _default_params_path_for_agent(AGENT_ID, ACTIVE_TIMEFRAMES)
+        os.environ["BTC_BEST_PARAMS_FILE"] = str(BEST_PARAMS_FILE)
+
+    if args.log_file:
+        PAPER_LOG_FILE = Path(os.path.expanduser(args.log_file))
+        os.environ["BTC_PAPER_LOG_FILE"] = str(PAPER_LOG_FILE)
+    elif not os.environ.get("BTC_PAPER_LOG_FILE") and (args.agent_id or args.timeframes):
+        PAPER_LOG_FILE = LOG_DIR / f"btc_paper_fast_{_safe_slug(AGENT_ID)}.log"
+        os.environ["BTC_PAPER_LOG_FILE"] = str(PAPER_LOG_FILE)
+
+    JOURNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BEST_PARAMS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PAPER_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # First split run starts from the current combined params, then diverges.
+    if BEST_PARAMS_FILE != DEFAULT_BEST_PARAMS_FILE and not BEST_PARAMS_FILE.exists():
+        seed = read_params_file(DEFAULT_BEST_PARAMS_FILE, mode="paper") if DEFAULT_BEST_PARAMS_FILE.exists() else {}
+        seed["name"] = str(seed.get("name") or f"{AGENT_ID}_seed")
+        seed["source"] = f"split-agent-seed:{AGENT_ID}:{','.join(str(tf) for tf in ACTIVE_TIMEFRAMES)}m"
+        write_params_file(BEST_PARAMS_FILE, seed, mode="paper")
+        log(f"Seeded params file {BEST_PARAMS_FILE} from {DEFAULT_BEST_PARAMS_FILE}")
+
+    return int(duration)
+
+
 if __name__ == "__main__":
-    duration = int(sys.argv[1]) if len(sys.argv) > 1 else 28800
+    args = parse_args()
+    duration = configure_runtime(args)
 
     # Continuous in-process GA is useful as a fallback, but the preferred
     # trainer is the isolated parallel autoresearch launchd agent. Disable this
@@ -1940,5 +2115,5 @@ if __name__ == "__main__":
     except Exception as e:
         log(f"Param load error: {e}")
     p = apply_param_overrides(p)
-    trader = PaperTrader(p)
+    trader = PaperTrader(p, timeframes=ACTIVE_TIMEFRAMES, agent_id=AGENT_ID)
     trader.run(duration=duration)

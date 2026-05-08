@@ -4,7 +4,7 @@ Generated: 2026-05-07
 
 ## Use case 1 — Validate a BTC 5m/15m strategy with fake money
 
-Actor: operator  
+Actor: operator
 Goal: see whether a strategy makes money on live Polymarket/BTC data without risking funds.
 
 Flow:
@@ -25,9 +25,47 @@ Success criteria:
 - at least 80 clean CLOB-executable trades
 - drawdown <= 25%
 
+## Use case 1a — Run 5m and 15m validation as separate agents
+
+Actor: operator / research operator
+Goal: isolate fast 5-minute behavior from slower 15-minute behavior while keeping total risk budget fixed.
+
+Flow:
+
+1. Start split paper agents:
+   ```bash
+   cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
+   PY=/usr/local/opt/python@3.11/bin/python3.11
+   $PY btc_split_paper_agents.py start --duration 21600 --capital-total 20
+   ```
+2. `btc-5m` watches and trades only BTC 5-minute Polymarket windows.
+3. `btc-15m` watches and trades only BTC 15-minute Polymarket windows.
+4. Each agent uses its own params/log/PID/run-until files.
+5. Both append resolved paper trades to the shared journal with `agent_id` and `window_tf`.
+6. Reporter prints combined and per-agent status.
+7. Optimizers or later analysis can score 5m and 15m separately.
+8. If controlled live agents are also running, restart with `--fast-ga --include-live-training` so each paper optimizer learns from resolved real fills for its own timeframe too.
+
+Success criteria:
+
+- two independent processes are visible in status
+- no agent trades the other timeframe
+- total virtual bankroll stays at `$20` unless explicitly changed
+- per-agent logs show only one timeframe
+- journal rows include `agent_id`
+
+Useful commands:
+
+```bash
+$PY btc_split_paper_agents.py status
+$PY btc_telegram_reporter.py --print
+$PY btc_split_paper_agents.py restart --duration 21600 --capital-total 20 --fast-ga --include-live-training
+$PY btc_split_paper_agents.py stop
+```
+
 ## Use case 2 — Compare many strategies in parallel
 
-Actor: research operator  
+Actor: research operator
 Goal: test many parameter/strategy variants faster than one linear run.
 
 Flow:
@@ -47,7 +85,7 @@ Success criteria:
 
 ## Use case 3 — Improve parameters without changing strategy code
 
-Actor: optimizer  
+Actor: optimizer
 Goal: tune thresholds while keeping strategy version frozen.
 
 Flow:
@@ -72,7 +110,7 @@ Success criteria:
 
 ## Use case 4 — Train a probability model from paper evidence
 
-Actor: model researcher  
+Actor: model researcher
 Goal: replace heuristic confidence with calibrated edge probability.
 
 Flow:
@@ -84,6 +122,7 @@ Flow:
 5. Evaluate AUC/calibration/holdout.
 6. Use `ProbabilityGate` in paper trader.
 7. Put weak models on probation instead of using them in main mode.
+8. When live canaries are explicitly authorized, rebuild with `btc_prob_dataset.py --include-live` to include resolved real fills as opt-in evidence.
 
 Success criteria:
 
@@ -94,7 +133,7 @@ Success criteria:
 
 ## Use case 5 — Add external market regime awareness
 
-Actor: data engineer / trader  
+Actor: data engineer / trader
 Goal: avoid trading against major derivatives flow/regime signals.
 
 Flow:
@@ -114,7 +153,7 @@ Success criteria:
 
 ## Use case 6 — Generate operational status report
 
-Actor: operator / Telegram monitor  
+Actor: operator / Telegram monitor
 Goal: know whether system is healthy without opening logs manually.
 
 Flow:
@@ -132,8 +171,8 @@ Success criteria:
 
 ## Use case 7 — Decide if live canary is allowed
 
-Actor: risk gate  
-Goal: block live testing until evidence is strong enough.
+Actor: risk gate
+Goal: block default live testing until evidence is strong enough; document explicit operator overrides.
 
 Flow:
 
@@ -143,6 +182,7 @@ Flow:
 4. Run `btc_trading_gym.py`.
 5. If any gate fails, verdict remains `NO_GO` or `KEEP_TRAINING`.
 6. If all gates pass, only a separately reviewed manual live canary can be considered.
+7. If Sebastian explicitly overrides and runs live canaries anyway, keep paper validation running and analyze live fills separately.
 
 Current result at doc generation: `NO_GO`.
 
@@ -158,7 +198,7 @@ Success criteria:
 
 ## Use case 8 — Emergency stop
 
-Actor: operator  
+Actor: operator
 Goal: stop all trading/training/reporting loops.
 
 Flow:
@@ -177,7 +217,7 @@ Success criteria:
 
 ## Use case 9 — Audit data-provider value
 
-Actor: cost-conscious operator  
+Actor: cost-conscious operator
 Goal: decide which paid/free data sources are worth keeping.
 
 Flow:
@@ -196,7 +236,7 @@ Current recommendation:
 
 ## Use case 10 — Prepare a human-reviewed manual canary ticket
 
-Actor: human trader  
+Actor: human trader
 Goal: test plumbing with minimal real-money risk after gates pass.
 
 Flow:
@@ -211,3 +251,50 @@ Non-goals:
 - autonomous trade selection
 - autonomous live order submission
 - bypassing readiness gates
+
+## 2026-05-08 Added use cases: live stop + post-loss audit
+
+### UC-LIVE-STOP — stop all trading after live losses
+
+Goal: immediately remove real-money risk.
+
+Command:
+
+```bash
+cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
+PY=/usr/local/opt/python@3.11/bin/python3.11
+$PY btc_split_live_agents.py stop
+$PY btc_split_live_agents.py status
+```
+
+Expected result:
+
+- live kill switch active,
+- 5m/15m live agents down,
+- CLOB open orders cancelled best-effort,
+- status prints strict filled journal WR/PnL.
+
+### UC-LIVE-CIRCUIT-BREAKER — fail closed during live canary
+
+Goal: prevent a losing canary from draining the remaining wallet.
+
+Default controls:
+
+```text
+--max-filled-losses 2
+--max-drawdown 2.75
+--min-wr-trades 4
+--min-wr 0.55
+```
+
+Expected result: when any condition trips, the live process stops, cancels open orders, and writes `state/live_trading_disabled.json`.
+
+### UC-SHADOW-IMPROVE — improve without live mutation
+
+Goal: keep collecting/training evidence without letting a live process change its own execution params mid-canary.
+
+Behavior:
+
+- Paper agents and labs may auto-improve.
+- Live agents score/journal outcomes but do not mutate params by default.
+- Live mutation requires explicit `--allow-live-param-mutation` and should be treated as a separate live-risk experiment.

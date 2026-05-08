@@ -20,6 +20,7 @@ import sys
 import time
 import glob
 import requests
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -391,10 +392,20 @@ def journal_sources() -> list[Path]:
     return deduped
 
 
-def load_journal_trades_from_sources(sources: list[Path]):
-    """Load resolved paper trades from explicit journal files."""
+def load_journal_trades_from_sources(sources: list[Path], include_live: bool | None = None):
+    """Load resolved journal trades from explicit journal files.
+
+    Default is paper-only. Set include_live=True or BTC_PROB_INCLUDE_LIVE=1 to
+    include resolved live fills as additional training evidence.
+    """
+    if include_live is None:
+        include_live = _env_bool("BTC_PROB_INCLUDE_LIVE", "0")
+    allowed_modes = {"paper"}
+    if include_live:
+        allowed_modes.add("live")
     trades = []
     loaded_sources = 0
+    mode_counts = Counter()
     for source in sources:
         source = Path(source)
         if not source.exists():
@@ -408,11 +419,13 @@ def load_journal_trades_from_sources(sources: list[Path]):
                     continue
                 try:
                     t = json.loads(line)
-                    if t.get("mode") != "paper":
+                    mode = t.get("mode") or "paper"
+                    if mode not in allowed_modes:
                         continue
                     if t.get("won") is None:
                         continue  # unresolved
                     t = dict(t)
+                    t["mode"] = mode
                     t["_source_journal"] = str(source)
                     t["_source_line"] = line_no
                     if not t.get("strategy"):
@@ -420,10 +433,12 @@ def load_journal_trades_from_sources(sources: list[Path]):
                             t["strategy"] = source.parents[1].name
                         except Exception:
                             t["strategy"] = "unknown"
+                    mode_counts[mode] += 1
                     trades.append(t)
                 except Exception:
                     continue
-    print(f"[dataset] Loaded {len(trades)} paper trades from {loaded_sources} journal(s)")
+    mode_summary = ", ".join(f"{mode}={count}" for mode, count in sorted(mode_counts.items())) or "none"
+    print(f"[dataset] Loaded {len(trades)} trades from {loaded_sources} journal(s) ({mode_summary}; include_live={include_live})")
     return trades
 
 
@@ -564,6 +579,14 @@ def dataset_key_from_meta(meta: dict) -> tuple:
 def dataset_key_from_trade(trade: dict) -> tuple:
     if trade.get("_source_journal") and trade.get("_source_line") is not None:
         return ("source", trade.get("_source_journal"), int(trade.get("_source_line")))
+    if trade.get("mode") == "live" and trade.get("placed_at"):
+        return (
+            "live",
+            trade.get("window_start"),
+            trade.get("window_tf"),
+            trade.get("direction"),
+            trade.get("placed_at"),
+        )
     if trade.get("strategy") and trade.get("placed_at"):
         return (
             "trade",
@@ -647,6 +670,7 @@ def build_dataset(append: bool = False):
                 "source_line": t.get("_source_line"),
                 "price_source": t.get("price_source"),
                 "direction": direction,
+                "mode": t.get("mode") or "paper",
             }
         }
         new_rows.append(row)
@@ -679,7 +703,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--append", action="store_true", help="Append to existing dataset")
     p.add_argument("--stats", action="store_true", help="Print dataset stats and exit")
+    p.add_argument("--include-live", action="store_true", help="Include resolved live fills in addition to paper rows")
     args = p.parse_args()
+
+    if args.include_live:
+        os.environ["BTC_PROB_INCLUDE_LIVE"] = "1"
 
     if args.stats:
         if not OUT_FILE.exists():

@@ -1,12 +1,51 @@
 # BTC Polymarket Trading App — Update Summary
 
-Generated: 2026-05-07  
-Scope: BTC-only Polymarket 5-minute and 15-minute markets.  
+Generated: 2026-05-08
+Scope: BTC-only Polymarket 5-minute and 15-minute markets.
 Default mode: paper trading with real market data and no real orders.
+
+## 2026-05-08 live canary postmortem and fix
+
+Status: **all BTC live/paper trading processes stopped** and live kill switch armed.
+
+Observed live canary outcome:
+
+- 5m live process ran with real Polymarket CLOB orders.
+- CLOB wallet after stop: `$7.48`.
+- CLOB open orders after stop: `0`.
+- Strict filled journal showed the canary was losing, not improving:
+  - 5m live strict filled: `3W / 7L`, `30% WR`, `-$9.63`.
+  - 15m historical live strict filled: `1W / 0L`, `+$1.96`.
+- Raw process counters were noisy because they mixed pending/reconciled state; strict filled journal is now the status truth source.
+
+Root causes fixed:
+
+1. **Live circuit breaker missing.** The process kept trading after loss clustering.
+   Fix: live mode now stops and arms the kill switch after configured filled-loss, drawdown, or WR-floor breaches.
+2. **Duplicate reconcile accounting.** A filled order could resolve once through the normal trade path, then later be synthesized again by reconcile, inflating counters and lessons.
+   Fix: pending fills are cleared on resolution, and `_resolve_from_open_order()` refuses to synthesize a second trade for an existing order id.
+3. **Slow balance retry in entry path.** The pre-order path could block on CLOB balance refresh, then submit too late in the 5m window.
+   Fix: entry uses non-blocking balance refresh only, then rechecks `seconds_left` immediately before order POST.
+4. **Live auto-mutation on tiny/noisy sample.** GA/LLM mutation could switch params during live trading based on very small samples and unfilled rows.
+   Fix: live param mutation is disabled by default; scoring ignores unfilled orders; live tuning requires a larger filled sample and explicit `--allow-live-param-mutation`.
+5. **Stop command incomplete.** Manual stop did not arm the kill switch/cancel orders by itself.
+   Fix: `btc_split_live_agents.py stop` arms the kill switch and best-effort cancels CLOB orders before stopping processes.
+
+New live safety defaults:
+
+```text
+BTC_LIVE_MAX_FILLED_LOSSES=2
+BTC_LIVE_MAX_DRAWDOWN_USDC=2.75
+BTC_LIVE_MIN_WR_TRADES=4
+BTC_LIVE_MIN_WR=0.55
+BTC_LIVE_ALLOW_PARAM_MUTATION=0
+```
+
+Operator implication: live canary is no longer a "let it run and see" process. If it fails early, it stops itself and requires a fresh audit before restart.
 
 ## Current readiness state
 
-The app is more capable than the original sniper, but it is not live-money ready yet.
+The app is more capable than the original sniper, but it is **not live-money ready** after the May 8 canary. Live is blocked until paper/shadow evidence proves edge with strict filled CLOB-realistic data.
 
 Latest verified gates:
 
@@ -50,6 +89,54 @@ Added or hardened:
 - Binance rate-limit fallback path.
 - Structured journal rows with strategy, CLOB price source, probability decision, external features, fees, PnL, and placement time.
 
+### 1a. 5m and 15m paper agents can now run as separate processes
+
+Files:
+
+- `btc_paper_fast.py`
+- `btc_split_paper_agents.py`
+- `btc_telegram_reporter.py`
+
+What changed:
+
+- `btc_paper_fast.py` now accepts:
+  - `--timeframes 5`
+  - `--timeframes 15`
+  - `--agent-id btc-5m`
+  - `--agent-id btc-15m`
+  - `--capital`
+  - `--best-params-file`
+  - `--log-file`
+- `btc_split_paper_agents.py` starts, stops, restarts, and reports two isolated paper agents:
+  - `btc-5m`: only BTC 5-minute Polymarket markets
+  - `btc-15m`: only BTC 15-minute Polymarket markets
+- Each split agent gets its own:
+  - PID file
+  - run-until file
+  - params file
+  - trader log
+  - stdout log
+  - paper bankroll allocation
+- The launcher applies paper-only runtime sizing overrides (`max_bet_pct=0.35`, `spend_ratio=0.20`) so `$10` per-agent bankrolls can clear Polymarket's 5-share minimum; params files remain separate and frozen.
+- Shared journal rows now include `agent_id`, so later analysis can separate 5m and 15m evidence.
+- Per-agent params are seeded from the current combined params on first start, then can diverge.
+- Telegram reporting detects running split agents and prints per-agent status/stats.
+- `--include-live-training` lets split paper FastGA score resolved real fills (`mode=live`) beside paper rows without placing live orders.
+
+Default split:
+
+```text
+btc-5m  -> 5m only,  $10 paper bankroll
+btc-15m -> 15m only, $10 paper bankroll
+```
+
+Validated:
+
+```text
+21 tests passed
+20s paper-only smoke start/status/stop worked for both agents
+```
+
 ### 2. External market-data layer added
 
 Main file: `btc_external_metrics.py`
@@ -86,6 +173,7 @@ Capabilities:
 - Build local SQLite feature rows from BTC market structure.
 - Backfill 5m/15m forward labels.
 - Build training datasets from paper journals and parallel lab journals.
+- Optionally include resolved live fills with `btc_prob_dataset.py --include-live`.
 - Normalize Up/Down probabilities into one absolute BTC-up target.
 - Preserve external derivatives features captured at entry time.
 - Train calibrated probability models.
@@ -305,7 +393,7 @@ Runtime artifacts should not be committed:
 
 ## Bottom line
 
-We built a serious paper-validation and research stack. We did not prove live edge yet.
+We built a serious paper-validation and research stack. We did not prove live edge yet; live fills are now first-class opt-in evidence for analysis instead of being ignored by training.
 
 The app is ready for:
 
@@ -315,8 +403,8 @@ The app is ready for:
 - CLOB-executable validation
 - manual review of candidate trade tickets
 
-The app is not ready for:
+The app is not ready by default for:
 
 - autonomous real-money trading
 - “best WR” live trade picking
-- live canary until gates pass
+- live canary unless Sebastian explicitly authorizes a controlled override

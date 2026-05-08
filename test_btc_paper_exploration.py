@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import tempfile
 import sys
 import unittest
@@ -84,6 +85,62 @@ class PaperExplorationTests(unittest.TestCase):
     def test_numeric_series_drops_bad_values(self):
         trader = m.PaperTrader(m.SniperParams())
         self.assertEqual(trader._numeric_series([1, "2", None, "bad", float("nan")]), [1.0, 2.0])
+
+    def test_parse_timeframes_accepts_only_btc_market_windows(self):
+        self.assertEqual(m.parse_timeframes("5"), [5])
+        self.assertEqual(m.parse_timeframes("5m,15m"), [5, 15])
+        self.assertEqual(m.parse_timeframes([15]), [15])
+        with self.assertRaises(ValueError):
+            m.parse_timeframes("1m")
+
+    def test_paper_trader_can_be_isolated_to_single_timeframe_agent(self):
+        trader = m.PaperTrader(m.SniperParams(), timeframes=[5], agent_id="btc-5m")
+        self.assertEqual(trader.agent_id, "btc-5m")
+        self.assertEqual(trader.timeframes, [5])
+        self.assertEqual(set(trader.windows), {5})
+
+    def test_fast_ga_can_opt_into_resolved_live_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            journal = Path(td) / "journal.jsonl"
+            rows = [
+                {
+                    "mode": "paper",
+                    "window_tf": 5,
+                    "won": True,
+                    "pnl": 1.0,
+                    "btc_delta": 12.0,
+                    "conf": 0.8,
+                    "poly_price": 0.50,
+                    "direction": "Up",
+                },
+                {
+                    "mode": "live",
+                    "window_tf": 5,
+                    "won": False,
+                    "pnl": -0.5,
+                    "btc_delta": 14.0,
+                    "conf": 0.9,
+                    "poly_price": 0.51,
+                    "direction": "Up",
+                },
+                {
+                    "mode": "live",
+                    "window_tf": 15,
+                    "won": True,
+                    "pnl": 0.4,
+                    "btc_delta": 10.0,
+                    "conf": 0.7,
+                    "poly_price": 0.49,
+                    "direction": "Down",
+                },
+            ]
+            journal.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+            paper_only = m.FastGA(timeframes=[5], include_live=False)._load_trades(journal)
+            with_live = m.FastGA(timeframes=[5], include_live=True)._load_trades(journal)
+
+            self.assertEqual([t["mode"] for t in paper_only], ["paper"])
+            self.assertEqual([t["mode"] for t in with_live], ["paper", "live"])
 
     def test_exploration_decision_allows_model_down_paper_label_collection(self):
         old = {

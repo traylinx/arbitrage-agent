@@ -8,6 +8,35 @@ tags: [polymarket, trading, intraday, btc, crypto, evolution, paper-trading]
 
 # Arbitrage Agent v7 — Polymarket BTC/ETH Intraday Trading Bot
 
+## Current BTC 5m/15m operator docs
+
+This skill file contains older historical context. The current BTC-only 5m/15m paper-validation app is documented here:
+
+- `README.md`
+- `docs/TRADING_APP_USER_MANUAL.md`
+- `docs/TRADING_APP_UPDATE_SUMMARY.md`
+- `docs/TRADING_APP_USE_CASES.md`
+
+Current split-agent commands:
+
+```bash
+cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
+PY=/usr/local/opt/python@3.11/bin/python3.11
+
+$PY btc_split_paper_agents.py start --duration 21600 --capital-total 20
+$PY btc_split_paper_agents.py restart --duration 21600 --capital-total 20 --fast-ga --include-live-training
+$PY btc_split_paper_agents.py status
+$PY btc_split_paper_agents.py stop
+```
+
+Split-agent behavior:
+
+- `btc-5m` trades only BTC 5-minute Polymarket windows.
+- `btc-15m` trades only BTC 15-minute Polymarket windows.
+- Both are paper-only by default.
+- Each has separate params, logs, PID, and run-until state.
+- `--include-live-training` does not place live orders; it lets FastGA score resolved `mode=live` journal fills beside paper rows.
+
 ## Core Philosophy
 
 **Real Polymarket data, virtual money, genetic evolution.** The goal is a profitable intraday trading bot that:

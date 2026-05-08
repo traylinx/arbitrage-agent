@@ -34,9 +34,21 @@ from typing import Optional
 HARVEY_HOME = Path(os.path.expanduser(os.environ.get("HARVEY_HOME", "~/MAKAKOO")))
 DATA_DIR = HARVEY_HOME / "data" / "arbitrage-agent" / "v2"
 STATE_DIR = DATA_DIR / "state"
+LIVE_KILL_SWITCH_FILE = Path(os.path.expanduser(os.environ.get(
+    "BTC_LIVE_KILL_SWITCH_FILE",
+    str(STATE_DIR / "live_trading_disabled.json"),
+)))
 LOG_DIR = DATA_DIR / "logs"
-JOURNAL_FILE = STATE_DIR / "intraday_journal.jsonl"
-BEST_PARAMS_FILE = STATE_DIR / "sniper_best_params.json"
+JOURNAL_FILE = Path(
+    os.environ.get("BTC_JOURNAL_FILE", str(STATE_DIR / "intraday_journal.jsonl"))
+)
+# Launcher pins this to a tf-specific file (sniper_best_params_5m.json or 15m.json)
+# so each agent uses its own paper-trained optimum. Without the override live ran
+# with ens_thresh=0.30 (loose) while paper's per-tf optima were 0.50 — half the
+# signals it took were noise the model would normally skip.
+BEST_PARAMS_FILE = Path(
+    os.environ.get("BTC_BEST_PARAMS_FILE", str(STATE_DIR / "sniper_best_params.json"))
+)
 FITNESS_HISTORY = DATA_DIR / "fitness_history.jsonl"
 PAPER_BALANCE_FILE = STATE_DIR / "sniper_paper_balance.json"
 
@@ -47,8 +59,22 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 PAPER_CAPITAL = 100.0
 TAKER_FEE_BPS = 200  # 2%
 POLYFEE = 0.01
-MIN_SPEND = 2.50
-MAX_TRADE_COST = 3.00  # HARD CAP: never risk more than $3 per trade
+# Caps are env-overridable so a $5 canary can run with $1 ticket sizes.
+# Defaults preserve original behavior; explicit env vars opt in.
+MIN_SPEND = float(os.environ.get("BTC_MIN_SPEND", "2.50"))
+MAX_TRADE_COST = float(os.environ.get("BTC_MAX_TRADE_COST", "3.00"))
+STOP_AFTER_FIRST_LOSS = os.environ.get("BTC_STOP_AFTER_FIRST_LOSS", "0") == "1"
+MIN_SECONDS_LEFT = float(os.environ.get("BTC_MIN_SECONDS_LEFT", "90"))
+LIVE_REQUIRE_EXTERNAL_CONTEXT = os.environ.get("BTC_LIVE_REQUIRE_EXTERNAL_CONTEXT", "1") == "1"
+LIVE_MAX_FILLED_LOSSES = int(os.environ.get("BTC_LIVE_MAX_FILLED_LOSSES", "2"))
+LIVE_MAX_DRAWDOWN_USDC = float(os.environ.get("BTC_LIVE_MAX_DRAWDOWN_USDC", "2.75"))
+LIVE_MIN_WR_TRADES = int(os.environ.get("BTC_LIVE_MIN_WR_TRADES", "4"))
+LIVE_MIN_WR = float(os.environ.get("BTC_LIVE_MIN_WR", "0.55"))
+LIVE_ALLOW_PARAM_MUTATION = os.environ.get("BTC_LIVE_ALLOW_PARAM_MUTATION", "0") == "1"
+PARAM_MIN_SAMPLE = int(os.environ.get("BTC_PARAM_MIN_SAMPLE", "20"))
+# When set, clamps live bankroll for sizing purposes regardless of CLOB balance.
+_max_bankroll_env = os.environ.get("BTC_MAX_BANKROLL_USDC", "")
+MAX_BANKROLL_USDC = float(_max_bankroll_env) if _max_bankroll_env else None
 BINANCE_REST = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 POLYMARKET_CLOB = "https://clob.polymarket.com"
@@ -63,12 +89,18 @@ _WARMUP_DONE = False
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+_LOG_PATH = Path(
+    os.environ.get("BTC_LOG_FILE", str(LOG_DIR / "btc_sniper_live.log"))
+)
+
+
 def log(msg: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line)
     try:
-        with open(LOG_DIR / "btc_sniper_live.log", "a") as f:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_LOG_PATH, "a") as f:
             f.write(line + "\n")
     except:
         pass
@@ -797,6 +829,56 @@ def fetch_btc_markets(tf_minutes: int = 5) -> Optional[dict]:
     return None
 
 
+def fetch_btc_market_for_window(tf_minutes: int, window_start: int) -> Optional[dict]:
+    """Fetch the exact BTC up/down market for a specific window start.
+
+    The live runner used to call ``fetch_btc_markets`` only after a new 5m
+    window had already started. That function checks current+future slugs, but
+    because we only invoked it after rollover the bot often discovered the
+    market 30-70s late. For 5m markets that is fatal: the signal forms, then
+    the min-left guard skips the trade.
+
+    This exact-window fetch is used for prefetching the next market before the
+    window starts, then arming it immediately at rollover.
+    """
+    slug = f"btc-updown-{tf_minutes}m-{int(window_start)}"
+    GAMMA_API = "https://gamma-api.polymarket.com"
+    now_ts = int(time.time())
+    try:
+        r = requests.get(
+            f"{GAMMA_API}/markets",
+            params={"slug": slug},
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        markets = data if isinstance(data, list) else data.get("data", [])
+        if not markets:
+            return None
+        m = markets[0]
+        if not isinstance(m, dict):
+            return None
+        if not m.get("acceptingOrders", False):
+            return None
+        if m.get("closed", True):
+            return None
+        end_date = m.get("endDate", "")
+        if end_date:
+            from datetime import datetime
+
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                if end_dt.timestamp() < now_ts:
+                    return None
+            except Exception:
+                pass
+        return m
+    except Exception:
+        return None
+
+
 def fetch_market_resolution(
     market_id: str, direction: str, up_idx: int = 0, down_idx: int = 1
 ) -> Optional[str]:
@@ -913,12 +995,14 @@ def get_binance_24h_ticker(symbol: str = "BTCUSDT") -> dict:
 
 
 # ── CLOB Client Wrapper ─────────────────────────────────────────────────────────
+# Migrated 2026-05-07 from py_clob_client (v1) to py_clob_client_v2 because
+# Polymarket upgraded the CLOB schema and v1 orders now fail with
+# 'order_version_mismatch'. Same external API, different SDK underneath.
 class CLOBClient:
     def __init__(self):
         from dotenv import load_dotenv
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import (
-            ApiCreds,
+        from py_clob_client_v2.client import ClobClient
+        from py_clob_client_v2.clob_types import (
             AssetType,
             BalanceAllowanceParams,
         )
@@ -929,25 +1013,25 @@ class CLOBClient:
         pk = os.environ.get("POLYMARKET_PRIVATE_KEY")
         funder = os.environ.get("POLYMARKET_FUNDER_ADDRESS")
         sig_type = int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", 2))
-        key = os.environ.get("POLYMARKET_API_KEY")
-        secret = os.environ.get("POLYMARKET_API_SECRET")
-        passphrase = os.environ.get("POLYMARKET_API_PASSPHRASE")
 
-        init_creds = ApiCreds(api_key=key, api_secret=secret, api_passphrase=passphrase)
         self._client = ClobClient(
             POLYMARKET_CLOB,
             key=pk,
             chain_id=137,
             signature_type=sig_type,
             funder=funder,
-            creds=init_creds,
         )
-        derived = self._client.derive_api_key()
+        # Always derive fresh creds; static .env.live creds are stale post-migration
+        derived = self._client.create_or_derive_api_key()
         self._client.set_api_creds(derived)
 
-        params = BalanceAllowanceParams(
-            asset_type=AssetType.COLLATERAL, signature_type=sig_type
-        )
+        try:
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL, signature_type=sig_type
+            )
+        except TypeError:
+            # v2 may not take signature_type
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         try:
             self._client.update_balance_allowance(params)
         except Exception:
@@ -963,43 +1047,87 @@ class CLOBClient:
     def place_order(
         self, token_id: str, side: str, price: float, size: float
     ) -> Optional[str]:
-        from py_clob_client.order_builder.constants import BUY, SELL
-        from py_clob_client.clob_types import OrderArgs
+        from py_clob_client_v2.order_builder.constants import BUY
+        from py_clob_client_v2.clob_types import OrderArgs, OrderType
 
         try:
-            # Always BUY when opening a position. token_id selects YES or NO outcome.
-            # (The `side` param is kept for API compat but we're always buying the outcome token.)
-            order_side = BUY
             order_args = OrderArgs(
                 price=min(price, 0.99),
                 size=size,
-                side=order_side,
+                side=BUY,
                 token_id=token_id,
             )
             signed = self._client.create_order(order_args)
-            resp = self._client.post_order(signed)
+            resp = self._client.post_order(signed, OrderType.GTC)
             if resp and resp.get("success"):
                 oid = resp.get("orderID", "unknown")
                 log(f"[CLOB] Order placed: {side} {size}@{price:.4f} oid={oid}")
                 return oid
             else:
                 log(f"[CLOB] Order rejected: {resp}")
+                recovered = self._recover_live_order(token_id)
+                if recovered:
+                    return recovered
                 return None
         except Exception as e:
             log(f"[CLOB] Order error: {e}")
+            recovered = self._recover_live_order(token_id)
+            if recovered:
+                return recovered
             return None
+
+    def _recover_live_order(self, token_id: str) -> Optional[str]:
+        """CLOB may post the order then throw a request exception.
+
+        Recover the newest live order for this asset so caller tracks it instead
+        of posting duplicates on the next loop.
+        """
+        try:
+            orders = [
+                o for o in self.get_open_orders()
+                if isinstance(o, dict)
+                and str(o.get("asset_id") or o.get("token_id") or "") == str(token_id)
+                and str(o.get("status", "")).upper() == "LIVE"
+            ]
+            if not orders:
+                return None
+            orders.sort(key=lambda o: float(o.get("created_at") or 0), reverse=True)
+            oid = orders[0].get("id")
+            if oid:
+                log(f"[CLOB] Recovered posted order after API error: oid={oid}")
+                return str(oid)
+        except Exception as e:
+            log(f"[CLOB] recover_live_order failed: {e}")
+        return None
 
     def cancel_order(self, order_id: str) -> bool:
         try:
-            self._client.cancel_order(order_id)
-            return True
-        except:
+            r = self._client.cancel_orders([order_id])
+            return order_id in (r or {}).get("canceled", [])
+        except Exception as e:
+            log(f"[CLOB] Cancel error: {e}")
             return False
+
+    def cancel_all_orders(self) -> bool:
+        try:
+            r = self._client.cancel_all()
+            log(f"[CLOB] Cancel-all response: {r}")
+            return True
+        except Exception as e:
+            log(f"[CLOB] Cancel-all error: {e}")
+            return False
+
+    def get_open_orders(self) -> list:
+        try:
+            return self._client.get_open_orders() or []
+        except Exception as e:
+            log(f"[CLOB] get_open_orders error: {e}")
+            return []
 
     def get_order_status(self, order_id: str) -> Optional[dict]:
         try:
             return self._client.get_order(order_id=order_id)
-        except:
+        except Exception:
             return None
 
 
@@ -1025,6 +1153,14 @@ class Trade:
     journaled: bool = False
     resolved_at: float = 0.0
     window_tf: int = 5
+    # On-chain fill verification — flips True only when CLOB get_order
+    # reports size_matched > 0. Without this, _resolve_trade fabricates
+    # WIN/LOSS for limit orders that never crossed the spread.
+    filled: bool = False
+    filled_size: float = 0.0
+    fill_verified_at: float = 0.0
+    entry_elapsed_sec: float = 0.0
+    seconds_left_at_entry: float = 0.0
 
 
 # ── Live Sniper ───────────────────────────────────────────────────────────────
@@ -1083,18 +1219,32 @@ class LiveSniper:
         self.starting = PAPER_CAPITAL
         self.trades: list[Trade] = []
         self.wins = self.losses = self.blocks = 0
+        self.unfilled = 0
         self.total_pnl = 0.0
         self.running = True
 
         self.btc_price: Optional[float] = None
         self.t0 = time.time()
 
-        self.windows: dict[int, WindowState] = {
-            5: WindowState(5),
-            15: WindowState(15),
-        }
-        self._timeframes = [5, 15]
-        self._capital_split = {5: 0.75, 15: 0.25}  # 5m has 70% WR vs 15m 57% — allocate more to winner
+        # Timeframes can be filtered via BTC_TIMEFRAMES env (e.g. "5" or "15")
+        # so we can run two isolated live processes — one per timeframe.
+        _tf_env = os.environ.get("BTC_TIMEFRAMES", "5,15").strip()
+        try:
+            tfs = sorted({int(x) for x in _tf_env.split(",") if x.strip()})
+        except Exception:
+            tfs = [5, 15]
+        if not tfs:
+            tfs = [5, 15]
+        self._timeframes = tfs
+        self.windows: dict[int, WindowState] = {tf: WindowState(tf) for tf in tfs}
+        # Default 75/25 split favors 5m WR. For tiny canary bankroll the 15m
+        # 25% slot is too small for 5-share min at $0.50 ($2.50). Override via env.
+        _split_5 = float(os.environ.get("BTC_CAPITAL_SPLIT_5M", "0.75"))
+        _split_15 = float(os.environ.get("BTC_CAPITAL_SPLIT_15M", "0.25"))
+        if len(tfs) == 1:
+            self._capital_split = {tfs[0]: 1.0}
+        else:
+            self._capital_split = {5: _split_5, 15: _split_15}
 
         self._open_orders: dict[str, dict] = {}
         self._reconciled_orders: set[str] = set()
@@ -1120,17 +1270,155 @@ class LiveSniper:
         self._total_deployed: float = 0.0
         self._last_analysis: float = 0.0
         self._adapt_cooldown: float = 0.0
+        self._external_ctx: dict = {}
+        self._external_ctx_loaded_at: float = 0.0
+
+        if os.environ.get("BTC_MAX_BET_PCT_OVERRIDE"):
+            self.params.max_bet_pct = float(os.environ["BTC_MAX_BET_PCT_OVERRIDE"])
+            log(f"[CANARY] max_bet_pct override={self.params.max_bet_pct:.2f}")
+        if os.environ.get("BTC_SPEND_RATIO_OVERRIDE"):
+            self.params.spend_ratio = float(os.environ["BTC_SPEND_RATIO_OVERRIDE"])
+            log(f"[CANARY] spend_ratio override={self.params.spend_ratio:.2f}")
 
         if live:
             try:
                 self._client = CLOBClient()
                 self.bankroll = self._client.balance
+                if MAX_BANKROLL_USDC is not None:
+                    capped = min(self.bankroll, MAX_BANKROLL_USDC)
+                    if capped < self.bankroll:
+                        log(f"[CANARY] Bankroll clamped from ${self.bankroll:.2f} to ${capped:.2f} via BTC_MAX_BANKROLL_USDC")
+                    self.bankroll = capped
                 self._balance = self.bankroll
                 self.starting = self.bankroll
-                log(f"[CLOB] Connected. Balance: ${self.bankroll:.2f}")
+                log(f"[CLOB] Connected. Bankroll for sizing: ${self.bankroll:.2f}")
             except Exception as e:
                 log(f"[CLOB] Failed to connect: {e}. Running in SIM mode.")
                 self.live = False
+
+    def _external_context(self) -> dict:
+        """Cached derivatives/flow context used by live decisions."""
+        now = self._now()
+        if self._external_ctx and now - self._external_ctx_loaded_at < 45:
+            return self._external_ctx
+        try:
+            from btc_external_metrics import fetch_external_market_context
+
+            ctx = fetch_external_market_context(use_cache=True) or {}
+        except Exception as e:
+            ctx = {"ok": 0, "error": f"{type(e).__name__}: {e}"}
+        self._external_ctx = ctx
+        self._external_ctx_loaded_at = now
+        return ctx
+
+    @staticmethod
+    def _f(ctx: dict, key: str, default: float = 0.0) -> float:
+        try:
+            v = ctx.get(key, default)
+            return float(v if v is not None else default)
+        except Exception:
+            return default
+
+    def _external_summary(self, ctx: dict) -> str:
+        age = self._f(ctx, "cache_age_sec", self._now() - self._f(ctx, "fetched_at", self._now()))
+        return (
+            f"ext_score={self._f(ctx,'external_bull_score'):+.3f} "
+            f"flow5m={self._f(ctx,'bg_taker_5m_imbalance'):+.3f} "
+            f"bg_recent={self._f(ctx,'bg_recent_trade_imbalance'):+.3f} "
+            f"bn_taker15={self._f(ctx,'bn_taker_15m_imbalance'):+.3f} "
+            f"bn_topLS={self._f(ctx,'bn_top_ls_15m_imbalance'):+.3f} "
+            f"bg_depth={self._f(ctx,'bg_depth_imbalance'):+.3f} "
+            f"hl_depth={self._f(ctx,'hl_depth_imbalance'):+.3f} "
+            f"oi_bn30={self._f(ctx,'bn_oi_30m_chg_pct'):+.3f} "
+            f"oi_by30={self._f(ctx,'by_oi_30m_chg_pct'):+.3f} "
+            f"ok ca/cg/bn/by/bg/hl={int(self._f(ctx,'ca_ok'))}/{int(self._f(ctx,'cg_ok'))}/{int(self._f(ctx,'bn_ok'))}/{int(self._f(ctx,'by_ok'))}/{int(self._f(ctx,'bg_ok'))}/{int(self._f(ctx,'hl_ok'))} "
+            f"age={age:.0f}s"
+        )
+
+    def _external_vote(self, direction: str, base_conf: float) -> tuple[bool, float, str, dict]:
+        ctx = self._external_context()
+        providers_ok = sum(
+            1 for k in ("ca_ok", "cg_ok", "bn_ok", "by_ok", "bg_ok", "hl_ok")
+            if self._f(ctx, k) > 0
+        )
+        if not ctx or self._f(ctx, "ok") <= 0 or providers_ok < 2:
+            reason = f"NO_GO external context missing/weak providers_ok={providers_ok} {ctx.get('error','') if isinstance(ctx, dict) else ''}"
+            return (not LIVE_REQUIRE_EXTERNAL_CONTEXT), base_conf, reason, ctx
+
+        ext_score = self._f(ctx, "external_bull_score")
+        flow = (
+            0.35 * self._f(ctx, "bg_taker_5m_imbalance")
+            + 0.20 * self._f(ctx, "bg_recent_trade_imbalance")
+            + 0.15 * self._f(ctx, "bn_taker_15m_imbalance")
+            + 0.10 * self._f(ctx, "bn_top_ls_15m_imbalance")
+            + 0.10 * self._f(ctx, "bg_depth_imbalance")
+            + 0.10 * self._f(ctx, "hl_depth_imbalance")
+        )
+        combo = max(-1.0, min(1.0, 0.65 * ext_score + 0.35 * flow))
+        want = 1.0 if direction == "Up" else -1.0
+        aligned = combo * want
+        conf = base_conf
+        if aligned >= 0.15:
+            conf = min(0.98, conf + 0.08)
+            verdict = "GO strong external alignment"
+        elif aligned >= 0.03:
+            conf = min(0.98, conf + 0.03)
+            verdict = "GO mild external alignment"
+        elif aligned <= -0.12:
+            return False, conf, f"NO_GO external contra combo={combo:+.3f} aligned={aligned:+.3f}", ctx
+        elif aligned <= -0.03:
+            conf = max(0.0, conf - 0.12)
+            verdict = "CAUTION external mildly contra"
+        else:
+            verdict = "GO external neutral"
+        return True, conf, f"{verdict} combo={combo:+.3f} aligned={aligned:+.3f}", ctx
+
+    def _halt_after_first_loss_if_needed(self, source: str):
+        if not (STOP_AFTER_FIRST_LOSS and self.live and self.losses >= 1):
+            return
+        self._stop_live(f"STOP_AFTER_FIRST_LOSS after {source}")
+
+    def _stop_live(self, reason: str):
+        """Stop live loop, cancel open orders, and arm the durable kill switch."""
+        log(f"[CANARY] LIVE STOP: {reason}; canceling open orders and arming kill switch")
+        self.running = False
+        if self._client:
+            try:
+                self._client.cancel_all_orders()
+            except Exception as e:
+                log(f"[CANARY] cancel-all after loss failed: {e}")
+        try:
+            LIVE_KILL_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            LIVE_KILL_SWITCH_FILE.write_text(json.dumps({
+                "disabled": True,
+                "reason": reason,
+                "ts": datetime.utcnow().isoformat() + "Z",
+            }, indent=2))
+        except Exception as e:
+            log(f"[CANARY] kill-switch write failed: {e}")
+
+    def _live_circuit_breaker(self, source: str):
+        """Fail closed on live canaries that are not proving edge."""
+        if not self.live:
+            return
+        filled = self.wins + self.losses
+        pnl = self.total_pnl
+        if LIVE_MAX_FILLED_LOSSES > 0 and self.losses >= LIVE_MAX_FILLED_LOSSES:
+            self._stop_live(
+                f"max filled losses reached ({self.losses}/{LIVE_MAX_FILLED_LOSSES}) after {source}"
+            )
+            return
+        if LIVE_MAX_DRAWDOWN_USDC > 0 and pnl <= -abs(LIVE_MAX_DRAWDOWN_USDC):
+            self._stop_live(
+                f"max live drawdown reached (${pnl:.2f} <= -${abs(LIVE_MAX_DRAWDOWN_USDC):.2f}) after {source}"
+            )
+            return
+        if filled >= LIVE_MIN_WR_TRADES and LIVE_MIN_WR > 0:
+            wr = self.wins / max(filled, 1)
+            if wr < LIVE_MIN_WR:
+                self._stop_live(
+                    f"live WR below floor ({wr:.0%} < {LIVE_MIN_WR:.0%} over {filled} filled) after {source}"
+                )
 
     def _window_for_tf(self, tf: int) -> WindowState:
         return self.windows[tf]
@@ -1144,6 +1432,40 @@ class LiveSniper:
 
     def _now(self) -> float:
         return time.time()
+
+    def _attach_market(self, win: WindowState, tf: int, mkt: dict, source: str = "fetch"):
+        """Attach a Polymarket market to a WindowState and log tradable prices."""
+        tokens = []
+        outcomes_raw = []
+        outcomes_labels = []
+        try:
+            tokens = json.loads(mkt.get("clobTokenIds", "[]"))
+            outcomes_raw = json.loads(mkt.get("outcomePrices", "[]"))
+            outcomes_labels = json.loads(mkt.get("outcomes", "[]"))
+        except Exception:
+            pass
+        win.market_id = mkt.get("id")
+        win.market_question = mkt.get("question", "?")
+        # Dynamically match UP/DOWN by outcome label (Polymarket ordering can vary)
+        up_idx, down_idx = 0, 1
+        for i, label in enumerate(outcomes_labels):
+            if str(label).lower() in ("up", "yes"):
+                up_idx = i
+            elif str(label).lower() in ("down", "no"):
+                down_idx = i
+        win._outcome_prices = [0.50, 0.50]
+        if len(outcomes_raw) >= 2:
+            # Preserve historical convention: _outcome_prices[0]=DOWN, [1]=UP
+            win._outcome_prices = [
+                float(outcomes_raw[down_idx]),
+                float(outcomes_raw[up_idx]),
+            ]
+        win._up_token_id = tokens[up_idx] if up_idx < len(tokens) else None
+        win._down_token_id = tokens[down_idx] if down_idx < len(tokens) else None
+        log(f"[PM {tf}m] Market({source}): {win.market_question}")
+        log(
+            f"[PM {tf}m] labels={outcomes_labels} up_idx={up_idx} down_idx={down_idx} | DOWN=${win._outcome_prices[0]:.3f} UP=${win._outcome_prices[1]:.3f}"
+        )
 
     def _journal_trade(self, t: Trade):
         if t.journaled:
@@ -1161,9 +1483,15 @@ class LiveSniper:
             "btc_price_enter": t.btc_price_enter,
             "conf": t.conf,
             "reasons": t.reasons,
+            "filled": getattr(t, "filled", False),
+            "filled_size": round(getattr(t, "filled_size", 0.0), 4),
+            "entry_elapsed_sec": round(getattr(t, "entry_elapsed_sec", 0.0), 3),
+            "seconds_left_at_entry": round(getattr(t, "seconds_left_at_entry", 0.0), 3),
             "won": t.won,
             "pnl": round(t.pnl, 4),
             "exit_reason": t.exit_reason,
+            "agent_id": os.environ.get("BTC_AGENT_ID", ""),
+            "timeframes": ",".join(str(tf) for tf in self._timeframes),
             "placed_at": datetime.fromtimestamp(t.placed_at).isoformat(),
             "resolved_at": datetime.fromtimestamp(t.resolved_at).isoformat()
             if t.resolved_at
@@ -1191,6 +1519,8 @@ class LiveSniper:
         up_price = win._outcome_prices[1]
         down_price = win._outcome_prices[0]
         poly_conviction = abs(up_price - 0.5) * 2
+        ext_ctx = self._external_context()
+        ext_summary = self._external_summary(ext_ctx)
 
         # Verbose diagnostic log (every check, so we can see why it's NOT firing)
         if abs(delta) >= 3:  # only log meaningful deltas to avoid spam
@@ -1198,31 +1528,49 @@ class LiveSniper:
             log(
                 f"[EVAL {tf}m] delta=${delta:+.1f} poly_conv={poly_conviction:.2f} "
                 f"→ dir={sig_probe['direction']} conf={sig_probe['conf']:.2f} "
-                f"(need: |d|>={self.params.delta_thresh:.0f} & conf>={self.params.conf_thresh:.2f})"
+                f"(need: |d|>={self.params.delta_thresh:.0f} & conf>={self.params.conf_thresh:.2f}) | {ext_summary}"
             )
 
         if abs(delta) < self.params.delta_thresh and poly_conviction < 0.90:
+            if abs(delta) >= 3:
+                log(f"[NO_GO {tf}m] base delta/poly too weak")
             return None
 
         sig = win.se.ensemble(self.params.ens_thresh, window_delta=delta)
 
         if sig["direction"] == "Neutral":
+            log(f"[NO_GO {tf}m] ensemble neutral | {ext_summary}")
             return None
         if (
             sig["conf"] < self.params.conf_thresh
             and abs(delta) < self.params.delta_thresh + 5
             and poly_conviction < 0.90
         ):
+            log(
+                f"[NO_GO {tf}m] base_conf={sig['conf']:.2f} below conf_thresh={self.params.conf_thresh:.2f}"
+            )
             return None
 
         direction = sig["direction"]
         hour = int(datetime.utcnow().strftime("%H"))
         conf = self._hour_adjust_conf(sig["conf"], direction, hour)
         if conf < self.params.conf_thresh:
+            log(f"[NO_GO {tf}m] hour-adjusted conf={conf:.2f} below threshold")
+            return None
+
+        ext_ok, conf, ext_reason, ext_ctx = self._external_vote(direction, conf)
+        ext_summary = self._external_summary(ext_ctx)
+        if not ext_ok:
+            log(f"[NO_GO {tf}m] {direction} rejected by external stack: {ext_reason} | {ext_summary}")
+            return None
+        log(f"[GO_CHECK {tf}m] {direction} base_conf={sig['conf']:.2f} adj_conf={conf:.2f} {ext_reason} | {ext_summary}")
+        if conf < self.params.conf_thresh:
+            log(f"[NO_GO {tf}m] external-adjusted conf={conf:.2f} below threshold")
             return None
 
         trade_price = up_price if direction == "Up" else down_price
         if trade_price > 0.72 and poly_conviction < 0.90:
+            log(f"[NO_GO {tf}m] trade_price={trade_price:.3f} too expensive for weak PM conviction")
             return None
         conviction = abs(trade_price - 0.50)
         if conviction < 0.04:
@@ -1234,6 +1582,7 @@ class LiveSniper:
         else:
             price_lo, price_hi = 0.40, 0.60
         if not (price_lo <= trade_price <= price_hi):
+            log(f"[NO_GO {tf}m] trade_price={trade_price:.3f} outside band {price_lo:.2f}-{price_hi:.2f}")
             return None
 
         PREFERRED_UP = {1, 11, 13, 15, 16, 17, 18, 19, 22}
@@ -1254,11 +1603,24 @@ class LiveSniper:
             "delta": delta,
             "conf": conf,
             "tier": tier,
-            "reasons": sig["reasons"],
-            "conditions": sig.get("conditions", {}),
+            "reasons": [*sig["reasons"], ext_reason, ext_summary],
+            "conditions": {
+                **sig.get("conditions", {}),
+                "external_bull_score": self._f(ext_ctx, "external_bull_score"),
+                "external_combo_reason": ext_reason,
+                "bg_taker_5m_imbalance": self._f(ext_ctx, "bg_taker_5m_imbalance"),
+                "bn_taker_15m_imbalance": self._f(ext_ctx, "bn_taker_15m_imbalance"),
+                "bg_recent_trade_imbalance": self._f(ext_ctx, "bg_recent_trade_imbalance"),
+            },
         }
 
     def _refresh_balance(self):
+        """Best-effort balance refresh without blocking the trading loop.
+
+        This used to retry 6 times with sleeps up to ~30s. In live 5m trading
+        that blocked window rollover and made the agent attach prefetched
+        markets 60s late. Balance freshness must not outrank entry timing.
+        """
         if not self._client:
             return
         try:
@@ -1267,28 +1629,52 @@ class LiveSniper:
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL, signature_type=2
             )
-            for attempt in range(6):
-                try:
-                    self._client.update_balance_allowance(params)
-                except Exception:
-                    pass
-                try:
-                    bal_resp = self._client.get_balance_allowance(params)
-                    raw = bal_resp.get("balance", "0")
-                    new_balance = float(raw) / 1e6
-                    if new_balance > 0:
-                        self._balance = new_balance
-                        self.bankroll = new_balance
-                        self._balance_cache = new_balance
-                        self._balance_cache_time = self._now()
-                        return
-                except Exception:
-                    pass
-                import time
-
-                time.sleep(1.5 * (attempt + 1))
+            try:
+                self._client.update_balance_allowance(params)
+            except Exception:
+                pass
+            bal_resp = self._client.get_balance_allowance(params)
+            raw = bal_resp.get("balance", "0")
+            new_balance = float(raw) / 1e6
+            if new_balance > 0:
+                self._balance = new_balance
+                self.bankroll = new_balance
+                self._balance_cache = new_balance
+                self._balance_cache_time = self._now()
+                return
         except Exception:
             pass
+
+    def _verify_fill_size(self, order_id: str) -> float:
+        """Return on-chain matched size (shares) for a CLOB order.
+
+        Truth source for whether a limit ever crossed the spread. Used by the
+        reconciliation + resolution paths to suppress phantom WIN/LOSS logging
+        for orders that never filled. Returns 0.0 on any error or unknown
+        state — caller treats 0 as 'unfilled'.
+        """
+        if not self.live or not self._client or not order_id:
+            return 0.0
+        try:
+            o = self._client.get_order_status(order_id) or {}
+        except Exception:
+            return 0.0
+        if not isinstance(o, dict):
+            return 0.0
+        for key in ("size_matched", "sizeMatched", "matched_size", "matchedSize"):
+            v = o.get(key)
+            if v is None:
+                continue
+            try:
+                return float(v)
+            except Exception:
+                continue
+        try:
+            orig = float(o.get("original_size", o.get("originalSize", 0)) or 0)
+            rem = float(o.get("size_remaining", o.get("sizeRemaining", orig)) or orig)
+            return max(0.0, orig - rem)
+        except Exception:
+            return 0.0
 
     def _refresh_balance_with_retry(self):
         """Call update_balance_allowance then get_balance_allowance in a retry loop.
@@ -1332,22 +1718,34 @@ class LiveSniper:
     def _place_trade(self, sig: dict, win: WindowState, tf: int) -> Optional[Trade]:
         if not win.market_id:
             return None
-        # Don't place orders if less than 90s remain in window — orderbook may vanish
+        # Don't place orders too late in window — orderbook may vanish.
         win_sec = tf * 60
         time_left = (win.window_start + win_sec) - self._now()
-        if time_left < 90:
+        if time_left < MIN_SECONDS_LEFT:
             log(
-                f"[SKIP {tf}m] Only {time_left:.0f}s left in window — too late to trade"
+                f"[SKIP {tf}m] Only {time_left:.0f}s left in window — min={MIN_SECONDS_LEFT:.0f}s"
             )
             return None
 
         now = self._now()
         if now - self._balance_cache_time > 10:
-            self._refresh_balance_with_retry()
+            # Never call the slow retry loop on the entry path. It can block
+            # for >60s, then place a stale order in the final seconds of a 5m
+            # market. Slow retry is only safe after fills/resolution.
+            self._refresh_balance()
             self._balance_cache = self._balance
             self._balance_cache_time = now
         else:
             self._balance = self._balance_cache
+
+        now = self._now()
+        time_left = (win.window_start + win_sec) - now
+        if time_left < MIN_SECONDS_LEFT:
+            log(
+                f"[SKIP {tf}m] Entry path delayed; only {time_left:.0f}s left "
+                f"in window — min={MIN_SECONDS_LEFT:.0f}s"
+            )
+            return None
 
         cap = self._cap_for_tf(tf)
         if cap < MIN_SPEND:
@@ -1361,6 +1759,10 @@ class LiveSniper:
         )
         if poly_price <= 0:
             poly_price = 0.50
+        # Cross-the-spread premium so resting limit orders actually fill.
+        _fill_premium_bps = float(os.environ.get("BTC_FILL_PREMIUM_BPS", "0"))
+        if _fill_premium_bps > 0:
+            poly_price = min(poly_price * (1.0 + _fill_premium_bps / 10000.0), 0.99)
 
         tier = sig.get("tier", "NORMAL")
         tier_max_bet_pct = 0.60 if tier == "ULTIMATE" else self.params.max_bet_pct
@@ -1375,10 +1777,28 @@ class LiveSniper:
         )
 
         size = spend / poly_price
-        min_shares = 3.0
+        # Polymarket 5/15-min markets enforce orderMinSize=5; SDK rejects below.
+        min_shares = float(os.environ.get("BTC_MIN_SHARES", "5.0"))
         if size < min_shares:
+            min_cost = min_shares * poly_price
+            if min_cost > MAX_TRADE_COST:
+                log(
+                    f"[BLOCK {tf}m] min_shares={min_shares:.2f} costs=${min_cost:.2f} "
+                    f"> max_order=${MAX_TRADE_COST:.2f}; no executable order"
+                )
+                self.blocks += 1
+                return None
+            if min_cost > cap * 0.95:
+                log(
+                    f"[BLOCK {tf}m] min_shares={min_shares:.2f} costs=${min_cost:.2f} "
+                    f"> cap95=${cap * 0.95:.2f}; bankroll cap too small"
+                )
+                self.blocks += 1
+                return None
             size = min_shares
-        cost = size * poly_price
+            cost = min_cost
+        else:
+            cost = size * poly_price
         if cost > MAX_TRADE_COST:
             size = MAX_TRADE_COST / poly_price
             size = float(int(size * 100)) / 100
@@ -1387,7 +1807,15 @@ class LiveSniper:
             size = cap * 0.95 / poly_price
             size = float(int(size * 100)) / 100
             cost = size * poly_price
+        # Absolute share cap — no math path can blow past this.
+        _abs_size_cap = float(os.environ.get("BTC_ABS_SIZE_CAP", "0"))
+        if _abs_size_cap > 0 and size > _abs_size_cap:
+            size = _abs_size_cap
+            cost = size * poly_price
         if cost < MIN_SPEND or size < 1.0:
+            log(
+                f"[BLOCK {tf}m] cost=${cost:.2f} size={size:.2f} below min_spend=${MIN_SPEND:.2f}"
+            )
             self.blocks += 1
             return None
 
@@ -1397,6 +1825,24 @@ class LiveSniper:
         order_id = None
 
         if self.live and self._client:
+            if os.environ.get("BTC_SINGLE_OPEN_ORDER", "1") == "1":
+                live_open = self._client.get_open_orders()
+                if live_open:
+                    ids = ",".join(str(o.get("id", ""))[:12] for o in live_open[:3] if isinstance(o, dict))
+                    log(
+                        f"[NO_GO {tf}m] existing CLOB open_orders={len(live_open)} ids={ids}; "
+                        "single-open-order guard blocks duplicate"
+                    )
+                    self.blocks += 1
+                    return None
+            now = self._now()
+            time_left = (win.window_start + win_sec) - now
+            if time_left < MIN_SECONDS_LEFT:
+                log(
+                    f"[SKIP {tf}m] Pre-order check delayed; only {time_left:.0f}s left "
+                    f"in window — min={MIN_SECONDS_LEFT:.0f}s"
+                )
+                return None
             # Use cached balance — don't block with slow retry refresh
             if self._balance < MIN_SPEND:
                 self.blocks += 1
@@ -1451,6 +1897,8 @@ class LiveSniper:
                 order_id=order_id,
                 token_id=trade_token_id,
                 market_id=win.market_id,
+                entry_elapsed_sec=now - (win.window_start or int(now // (tf * 60) * (tf * 60))),
+                seconds_left_at_entry=(win.window_start or int(now // (tf * 60) * (tf * 60))) + win_sec - now,
             )
             self.trades.append(trade)
         except Exception as e:
@@ -1470,28 +1918,43 @@ class LiveSniper:
         if not self.live or not self._client:
             return
 
-        # Also refresh balance during reconciliation
-        self._refresh_balance()
-
         try:
-            from py_clob_client.clob_types import OpenOrderParams
-
-            params = OpenOrderParams()
-            all_orders = self._client._client.get_orders(params) or []
-            open_orders = [o for o in all_orders if o.get("status") == "open"]
+            # v2 CLOB exposes live GTC orders via get_open_orders() with
+            # status="LIVE" and id=<order hash>. The older v1 get_orders()
+            # shape used status="open"/orderID, which made every live order
+            # look absent and broke fill/cancel reconciliation.
+            open_orders = self._client.get_open_orders() or []
         except Exception:
             return
 
-        live_order_ids = {str(o.get("orderID", "")) for o in open_orders}
+        live_order_ids = {
+            str(o.get("id") or o.get("orderID") or o.get("order_id") or "")
+            for o in open_orders
+            if isinstance(o, dict)
+        }
         our_open_ids = set(self._open_orders.keys())
 
-        # Cancel orders that are no longer on CLOB (filled or cancelled)
+        # An order leaving the open list can mean filled OR cancelled.
+        # Distinguish via on-chain matched size; only treat fills as positions.
         for oid in our_open_ids - live_order_ids:
             if oid in self._reconciled_orders:
                 continue
             self._reconciled_orders.add(oid)
             info = self._open_orders.pop(oid, {})
-            log(f"[RECONCILE] Order {oid[:16]}... filled/cancelled")
+            matched = self._verify_fill_size(oid)
+            for t in self.trades:
+                if t.order_id == oid:
+                    t.fill_verified_at = self._now()
+                    if matched > 0:
+                        t.filled = True
+                        t.filled_size = matched
+                    break
+            if matched <= 0:
+                log(f"[RECONCILE] Order {oid[:16]}... CANCELLED (size_matched=0)")
+                # Refund our local deployment counter — money never left.
+                self._total_deployed -= info.get("spend", 0)
+                continue
+            log(f"[RECONCILE] Order {oid[:16]}... FILLED size={matched:.2f}")
             self._resolve_from_open_order(oid, info)
             self._refresh_balance_with_retry()
 
@@ -1544,6 +2007,14 @@ class LiveSniper:
                     log(f"[RECONCILE] Fill pending window close: {order_id[:16]}...")
                 return
 
+        # If the original Trade already exists and resolved, do not synthesize a
+        # second trade from the same CLOB order. This was inflating live losses
+        # in status after the pending-fill path resolved first and reconcile
+        # later saw the same order again.
+        if any(t.order_id == order_id for t in self.trades):
+            self._pending_fills.pop(order_id, None)
+            return
+
         if not window_start:
             return
         tf_sec = info.get("window_tf", 5) * 60
@@ -1585,6 +2056,11 @@ class LiveSniper:
                 pnl=pnl,
                 resolved_at=self._now(),
                 exit_reason="reconciled_fill",
+                filled=True,
+                filled_size=(spend / poly_price) if poly_price > 0 else 0.0,
+                fill_verified_at=self._now(),
+                entry_elapsed_sec=placed_at - window_start,
+                seconds_left_at_entry=(window_start + tf_sec) - placed_at,
                 journaled=True,
                 window_tf=info.get("window_tf", 5),
             )
@@ -1600,6 +2076,8 @@ class LiveSniper:
             if self.live:
                 self._refresh_balance_with_retry()
                 self.bankroll = self._balance
+                self._halt_after_first_loss_if_needed("reconciled_fill")
+                self._live_circuit_breaker("reconciled_fill")
             else:
                 self._balance += pnl
                 self.bankroll = self._balance
@@ -1613,6 +2091,42 @@ class LiveSniper:
 
     # ── Resolve trade ─────────────────────────────────────────────────────────
     def _resolve_trade(self, t: Trade, actual_dir: str):
+        # Live mode: an unfilled limit must NOT be booked as WIN/LOSS.
+        # Final on-chain check before settling — prior session lost ~$11
+        # while bot logged "4W 3L +$0.57" because it skipped this gate.
+        if self.live and not t.filled and t.order_id:
+            matched = self._verify_fill_size(t.order_id)
+            if matched > 0:
+                t.filled = True
+                t.filled_size = matched
+                t.fill_verified_at = self._now()
+
+        if self.live and not t.filled:
+            t.resolved = True
+            t.won = False
+            t.pnl = 0.0
+            t.resolved_at = self._now()
+            t.exit_reason = "unfilled"
+            if self._client and t.order_id:
+                try:
+                    self._client.cancel_order(t.order_id)
+                except Exception:
+                    pass
+            if t.order_id:
+                self._pending_fills.pop(t.order_id, None)
+            for oid, info in list(self._open_orders.items()):
+                if info.get("order_id") == t.order_id or oid == t.order_id:
+                    self._open_orders.pop(oid, None)
+                    self._total_deployed -= info.get("spend", 0)
+                    break
+            self.unfilled += 1
+            self._journal_trade(t)
+            log(
+                f"       ⚪ UNFILLED {getattr(t, 'window_tf', 5)}m: {t.direction} | "
+                f"price={t.poly_price:.4f} | order never crossed — $0 booked"
+            )
+            return
+
         won = t.direction == actual_dir
         if won:
             pnl = t.spend * (1.0 / t.poly_price - 1) * (1 - TAKER_FEE_BPS / 10000)
@@ -1627,6 +2141,8 @@ class LiveSniper:
 
         if self.live and self._client and t.order_id:
             self._client.cancel_order(t.order_id)
+        if t.order_id:
+            self._pending_fills.pop(t.order_id, None)
 
         for oid, info in list(self._open_orders.items()):
             if info.get("order_id") == t.order_id or oid == t.order_id:
@@ -1660,13 +2176,22 @@ class LiveSniper:
             f"       {result_emoji} RESOLVED {getattr(t, 'window_tf', 5)}m: {actual_dir} | "
             f"{'WIN' if won else 'LOSS'} ${pnl:+7.2f} | Bk=${self._balance:.2f}"
         )
+        self._halt_after_first_loss_if_needed("_resolve_trade")
+        self._live_circuit_breaker("_resolve_trade")
 
     # ── Per-trade analysis + adaptive param tuning ──────────────────────────
     def _analyse_trade(self, t: Trade):
         """Analyze trade outcome and record lessons. Slowly adapt params."""
         try:
             now = self._now()
-            entry_age = now - t.placed_at if t.placed_at else 999
+            entry_elapsed = getattr(t, "entry_elapsed_sec", 0.0) or (
+                (t.placed_at - t.window_start) if t.placed_at and t.window_start else 999
+            )
+            seconds_left = getattr(t, "seconds_left_at_entry", 0.0) or (
+                (t.window_start + getattr(t, "window_tf", 5) * 60 - t.placed_at)
+                if t.placed_at and t.window_start
+                else 0.0
+            )
             conditions = {
                 "window_tf": getattr(t, "window_tf", 5),
                 "delta": abs(t.btc_delta),
@@ -1678,7 +2203,8 @@ class LiveSniper:
                     k, v = item
                     if isinstance(v, (int, float)):
                         conditions[f"reason_{k}"] = v
-            conditions["entry_age_secs"] = round(entry_age, 0)
+            conditions["entry_elapsed_sec"] = round(entry_elapsed, 0)
+            conditions["seconds_left_at_entry"] = round(seconds_left, 0)
             analysis = self.lessons.analyse(
                 {
                     "direction": t.direction,
@@ -1706,6 +2232,9 @@ class LiveSniper:
         """Meta-harness style improvement:
         baseline → LLM propose → simulate → apply only if delta > 0.
         Uses journal + lessons as ground truth for simulation."""
+        if self.live and not LIVE_ALLOW_PARAM_MUTATION:
+            log("       🧬 SHADOW ONLY: live param mutation disabled; paper training must promote params")
+            return
         try:
             improvement = self._meta_harness_improve()
             if improvement:
@@ -1716,19 +2245,24 @@ class LiveSniper:
     def _meta_harness_improve(self) -> Optional[str]:
         """Run one meta-harness cycle. Returns description of what changed, or None."""
         recent = self._load_recent_trades(n=50)
-        if len(recent) < 5:
+        scored_recent = self._scored_trades(recent)
+        if len(scored_recent) < max(5, PARAM_MIN_SAMPLE if self.live else 5):
+            log(
+                f"       🧬 Waiting for scored filled sample "
+                f"({len(scored_recent)}/{max(5, PARAM_MIN_SAMPLE if self.live else 5)})"
+            )
             return None
 
-        baseline_score = self._score_trades(recent)
+        baseline_score = self._score_trades(scored_recent)
         log(
-            f"       🧬 META-HARNESS: baseline_score={baseline_score:.4f} from {len(recent)} trades"
+            f"       🧬 META-HARNESS: baseline_score={baseline_score:.4f} from {len(scored_recent)} scored filled trades"
         )
 
         sugg = self.lessons.suggest_params()
-        if not sugg and len(recent) < 10:
+        if not sugg and len(scored_recent) < 10:
             return None
 
-        prompt = self._build_improvement_prompt(recent, baseline_score, sugg)
+        prompt = self._build_improvement_prompt(scored_recent, baseline_score, sugg)
         proposal = ai_complete(prompt, max_tokens=800)
 
         if not proposal:
@@ -1761,7 +2295,7 @@ class LiveSniper:
                 except (ValueError, TypeError):
                     pass
 
-        simulated_trades = self._simulate_trades(recent, proposed_params)
+        simulated_trades = self._simulate_trades(scored_recent, proposed_params)
         proposed_score = self._score_trades(simulated_trades)
         delta = proposed_score - baseline_score
 
@@ -1803,6 +2337,7 @@ class LiveSniper:
     def _score_trades(self, trades: list[dict]) -> float:
         """Score = win rate * avg_pnl - avg_loss_rate * loss_ratio.
         Higher = better strategy."""
+        trades = self._scored_trades(trades)
         if not trades:
             return 0.0
         wins = [t for t in trades if t.get("won")]
@@ -1816,31 +2351,45 @@ class LiveSniper:
         score = total_pnl * 10 + wr * 5 + min(len(trades), 50) * 0.1
         return score
 
+    def _scored_trades(self, trades: list[dict]) -> list[dict]:
+        """Return only economically meaningful outcomes for tuning/scoring.
+
+        Live limit orders that never filled are execution labels, not strategy
+        wins/losses. Counting them as losses made GA prefer nonsense mutations
+        after tiny samples. Paper rows often lack a filled flag; treat those as
+        filled unless they explicitly say unfilled.
+        """
+        out = []
+        for t in trades:
+            if not isinstance(t, dict):
+                continue
+            if t.get("exit_reason") == "unfilled":
+                continue
+            if t.get("filled") is False:
+                continue
+            if t.get("won") is True:
+                out.append(t)
+                continue
+            try:
+                pnl = float(t.get("pnl", 0) or 0)
+            except Exception:
+                pnl = 0.0
+            if t.get("won") is False and pnl < 0:
+                out.append(t)
+        return out
+
     def _simulate_trades(self, trades: list[dict], params: SniperParams) -> list[dict]:
         """Apply new params to historical trades and compute outcomes.
         Re-evaluates whether each trade would have fired given the new params."""
         simulated = []
-        for t in trades:
+        for t in self._scored_trades(trades):
             delta = abs(t.get("btc_delta", 0))
             conf = t.get("conf", 0)
             if delta < params.delta_thresh:
                 continue
             if conf < params.conf_thresh:
                 continue
-            direction = t.get("direction", "?")
-            btc_delta = t.get("btc_delta", 0)
-            entry = t.get("btc_price_enter", 0)
-            window_close = entry + btc_delta
-            actual = "Up" if window_close > entry else "Down"
-            won = direction == actual
-            pnl = (
-                t.get("spend", 10) * (1.0 / t.get("poly_price", 0.5) - 1)
-                if won
-                else -t.get("spend", 10)
-            )
             sim = dict(t)
-            sim["won"] = won
-            sim["pnl"] = pnl
             simulated.append(sim)
         return simulated
 
@@ -1940,6 +2489,9 @@ Return JSON:
         last_status = 0
         last_reconcile = 0
         last_window = {5: 0, 15: 0}
+        last_prefetch = {5: 0, 15: 0}
+        prefetched_markets: dict[int, dict[int, dict]] = defaultdict(dict)
+        prefetch_seconds = float(os.environ.get("BTC_MARKET_PREFETCH_SECONDS", "150"))
         checks = 0
         sig_counts = defaultdict(int)
 
@@ -1970,6 +2522,21 @@ Return JSON:
                     win = self.windows[tf]
                     win_sec = tf * 60
                     window_ts = int(now / win_sec) * win_sec
+                    next_window_ts = window_ts + win_sec
+                    time_to_next = next_window_ts - now
+                    if (
+                        0 < time_to_next <= prefetch_seconds
+                        and prefetched_markets[tf].get(next_window_ts) is None
+                        and now - last_prefetch.get(tf, 0) > 10
+                    ):
+                        m_next = fetch_btc_market_for_window(tf, next_window_ts)
+                        last_prefetch[tf] = now
+                        if m_next:
+                            prefetched_markets[tf][next_window_ts] = m_next
+                            log(
+                                f"[PM {tf}m] Prefetched next market @{datetime.fromtimestamp(next_window_ts)} "
+                                f"({time_to_next:.0f}s before start)"
+                            )
                     if window_ts != last_window.get(tf, 0):
                         last_window[tf] = window_ts
                         if self.btc_price:
@@ -1977,51 +2544,23 @@ Return JSON:
                             log(
                                 f"\n[WIN {tf}m] @{datetime.fromtimestamp(window_ts)} price=${self.btc_price:.2f}"
                             )
+                            if prefetched_markets[tf].get(window_ts):
+                                self._attach_market(
+                                    win,
+                                    tf,
+                                    prefetched_markets[tf].pop(window_ts),
+                                    source="prefetch",
+                                )
                             last_market[tf] = 0
 
                 # ── Market fetching (per timeframe, staggered) ──
                 for tf in self._timeframes:
                     win = self.windows[tf]
                     if win.market_id is None and now - last_market.get(tf, 0) > 10:
-                        mkt = fetch_btc_markets(tf)
+                        current_window = int(now / (tf * 60)) * (tf * 60)
+                        mkt = fetch_btc_market_for_window(tf, current_window)
                         if mkt:
-                            tokens = []
-                            outcomes_raw = []
-                            outcomes_labels = []
-                            try:
-                                tokens = json.loads(mkt.get("clobTokenIds", "[]"))
-                                outcomes_raw = json.loads(
-                                    mkt.get("outcomePrices", "[]")
-                                )
-                                outcomes_labels = json.loads(mkt.get("outcomes", "[]"))
-                            except Exception:
-                                pass
-                            win.market_id = mkt.get("id")
-                            win.market_question = mkt.get("question", "?")
-                            # Dynamically match UP/DOWN by outcome label (Polymarket ordering can vary)
-                            up_idx, down_idx = 0, 1
-                            for i, label in enumerate(outcomes_labels):
-                                if str(label).lower() in ("up", "yes"):
-                                    up_idx = i
-                                elif str(label).lower() in ("down", "no"):
-                                    down_idx = i
-                            win._outcome_prices = [0.50, 0.50]
-                            if len(outcomes_raw) >= 2:
-                                # Preserve historical convention: _outcome_prices[0]=DOWN, [1]=UP
-                                win._outcome_prices = [
-                                    float(outcomes_raw[down_idx]),
-                                    float(outcomes_raw[up_idx]),
-                                ]
-                            win._up_token_id = (
-                                tokens[up_idx] if up_idx < len(tokens) else None
-                            )
-                            win._down_token_id = (
-                                tokens[down_idx] if down_idx < len(tokens) else None
-                            )
-                            log(f"[PM {tf}m] Market: {win.market_question}")
-                            log(
-                                f"[PM {tf}m] labels={outcomes_labels} up_idx={up_idx} down_idx={down_idx} | DOWN=${win._outcome_prices[0]:.3f} UP=${win._outcome_prices[1]:.3f}"
-                            )
+                            self._attach_market(win, tf, mkt, source="current")
                             last_market[tf] = int(now)
 
                 # ── Resolve trades (per-window duration) ──
@@ -2100,7 +2639,7 @@ Return JSON:
                     sugg_str = f" LESSONS:{len(sugg)}" if sugg else ""
                     log(
                         f"[{datetime.fromtimestamp(now).strftime('%H:%M:%S')}] elapsed={elapsed_h:.1f}h "
-                        f"trades={tt}(W:{self.wins} L:{self.losses}) WR={wr:.0%} "
+                        f"trades={tt}(W:{self.wins} L:{self.losses} U:{self.unfilled}) WR={wr:.0%} "
                         f"Bk=${self._balance:.2f}({pnl_pct:+.1f}%) "
                         f"BTC=${self.btc_price or 0:.0f} signals={dict(sig_counts)}{sugg_str}"
                     )
@@ -2129,6 +2668,9 @@ Return JSON:
 
         def bg():
             try:
+                if self.live and not LIVE_ALLOW_PARAM_MUTATION:
+                    log("[GA] SHADOW ONLY: live param mutation disabled; paper training must promote params")
+                    return
                 recent = []
                 try:
                     with open(JOURNAL_FILE) as f:
@@ -2143,11 +2685,13 @@ Return JSON:
                 except:
                     pass
 
+                recent = self._scored_trades(recent)
                 wins = [t for t in recent if t.get("won")]
                 losses = [t for t in recent if not t.get("won")]
                 total = wins + losses
-                if len(total) < 5:
-                    log(f"[GA] Waiting for more BTC trades ({len(total)}/5)")
+                min_sample = PARAM_MIN_SAMPLE if self.live else 5
+                if len(total) < min_sample:
+                    log(f"[GA] Waiting for more scored filled BTC trades ({len(total)}/{min_sample})")
                     return
 
                 ga = SniperGA()
@@ -2243,7 +2787,7 @@ Return JSON:
         fired = 0
         fired_wins = 0
         fired_pnl = 0.0
-        for t in trades:
+        for t in self._scored_trades(trades):
             delta = abs(t.get("btc_delta", 0))
             base_conf = t.get("conf", 0)
             if delta < params.delta_thresh:
@@ -2282,7 +2826,8 @@ Return JSON:
                 fired_wins += 1
             fired_pnl += t.get("pnl", 0)
 
-        if fired < 3:
+        min_fired = PARAM_MIN_SAMPLE if self.live else 3
+        if fired < min_fired:
             return 0.0
         wr = fired_wins / fired
         return fired_pnl * 10 + wr * 20 - max(0, 10 - fired) * 0.5
@@ -2481,6 +3026,28 @@ Suggest 3 param changes. Return JSON: {{"suggestions": [{{"param": "...", "curre
 
 def assert_live_go_gate() -> None:
     """Hard block real-money mode unless the mechanical CLOB-only gate passes."""
+    if LIVE_KILL_SWITCH_FILE.exists() and os.environ.get("BTC_LIVE_KILL_SWITCH_OVERRIDE") != "I_UNDERSTAND_REAL_MONEY_LOSS_RISK":
+        reason = ""
+        try:
+            reason = json.loads(LIVE_KILL_SWITCH_FILE.read_text()).get("reason", "")
+        except Exception:
+            reason = LIVE_KILL_SWITCH_FILE.read_text(errors="replace").strip()[:240]
+        suffix = f": {reason}" if reason else ""
+        raise SystemExit(
+            f"LIVE BLOCKED: kill switch active at {LIVE_KILL_SWITCH_FILE}{suffix}. "
+            "Remove the file or set BTC_LIVE_KILL_SWITCH_OVERRIDE=I_UNDERSTAND_REAL_MONEY_LOSS_RISK after audit."
+        )
+
+    # Operator-override path: deliberate, distinct from the disabled-on-purpose
+    # BTC_LIVE_DISABLE_GO_GATE trap. Requires a long magic string that the
+    # operator must paste consciously, plus the canary ACK below. Used for
+    # author-authorized $5-cap canary runs while gates are still NO_GO.
+    if os.environ.get("BTC_LIVE_OPERATOR_OVERRIDE") == "AUTHOR_AUTHORIZED_CANARY_5USDC_1USDC_TICKET":
+        log("LIVE GATE OVERRIDDEN by operator. Caps via BTC_MAX_* env vars must be set.")
+        ack = os.environ.get("BTC_LIVE_CANARY_ACK")
+        if ack != "I_ACCEPT_CANARY_RISK_MAX_5_USDC":
+            raise SystemExit("LIVE BLOCKED: operator override requires BTC_LIVE_CANARY_ACK=I_ACCEPT_CANARY_RISK_MAX_5_USDC")
+        return
     if os.environ.get("BTC_LIVE_DISABLE_GO_GATE", "0") == "1":
         raise SystemExit("LIVE BLOCKED: BTC_LIVE_DISABLE_GO_GATE override is disabled on purpose. Do not bypass gates.")
     gate = Path(__file__).with_name("btc_live_go_nogo.py")
@@ -2513,7 +3080,16 @@ def main():
     parser.add_argument(
         "--duration", type=int, default=None, help="Run duration in seconds"
     )
+    parser.add_argument(
+        "--timeframes",
+        type=str,
+        default=None,
+        help="Comma-separated timeframes to trade, e.g. '5' or '15' or '5,15'",
+    )
     args = parser.parse_args()
+
+    if args.timeframes:
+        os.environ["BTC_TIMEFRAMES"] = args.timeframes
 
     live = args.live and not args.paper
     if live:

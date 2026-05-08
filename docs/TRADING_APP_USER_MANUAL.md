@@ -1,8 +1,8 @@
 # BTC Polymarket Trading App — User Manual
 
-Generated: 2026-05-07  
-App root: `/Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src`  
-Data root: `/Users/sebastian/MAKAKOO/data/arbitrage-agent/v2`  
+Generated: 2026-05-08
+App root: `/Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src`
+Data root: `/Users/sebastian/MAKAKOO/data/arbitrage-agent/v2`
 Report root: `/Users/sebastian/MAKAKOO/data/reports/gym/btc-polymarket-trader`
 
 ## 0. Safety model
@@ -15,7 +15,21 @@ Default supported mode is paper-only:
 - no order POSTs
 - no autonomous live-money orders
 
-Live-money mode is not documented as an operator flow because the current gate is `NO_GO`. Use this manual to run validation, research, reporting, and readiness checks.
+Live-money mode is blocked by the durable kill switch after the May 8 canary loss. Use this manual to run validation, research, reporting, and readiness checks. If live is restarted later, keep the circuit breakers enabled.
+
+Emergency stop:
+
+```bash
+cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
+PY=/usr/local/opt/python@3.11/bin/python3.11
+$PY btc_split_live_agents.py stop
+```
+
+This does three things:
+
+1. writes `data/arbitrage-agent/v2/state/live_trading_disabled.json`,
+2. cancels current CLOB open orders best-effort,
+3. stops split live-agent processes.
 
 ## 1. Requirements
 
@@ -43,6 +57,7 @@ Runtime data directories are created automatically under:
 ### Core paper trader
 
 - `btc_paper_fast.py` — main BTC 5m/15m paper trader.
+- `btc_split_paper_agents.py` — starts/stops separate `btc-5m` and `btc-15m` paper-agent processes.
 - `btc_paper_fast_watchdog.py` — keeps bounded paper run alive.
 - `btc_fee_model.py` — Polymarket fee/PnL model.
 - `btc_param_contract.py` — trainable vs frozen parameter contract.
@@ -112,6 +127,18 @@ ps -axo pid,ppid,pgid,stat,etime,command \
   | grep -v grep
 ```
 
+Check split live-agent status and strict filled journal truth:
+
+```bash
+$PY btc_split_live_agents.py status
+```
+
+Read this status carefully:
+
+- `trades=W/L/U` in the last log line is the process-local counter.
+- `journal strict filled` is the better money metric because it excludes unfilled limit orders and uses resolved filled journal rows.
+- If the kill switch is active, live restart is refused unless you remove it intentionally or use the explicit override.
+
 Check launchd jobs:
 
 ```bash
@@ -169,6 +196,160 @@ Watch logs:
 ```bash
 tail -f /Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/logs/btc_paper_fast_watchdog.log
 ```
+
+## 5a. Start the split 5m and 15m paper agents
+
+Use this when you want 5-minute and 15-minute Polymarket BTC markets isolated into two separate paper-only processes.
+
+```bash
+cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
+PY=/usr/local/opt/python@3.11/bin/python3.11
+
+$PY btc_split_paper_agents.py start --duration 21600 --capital-total 20
+```
+
+Default process layout:
+
+| Agent | Markets | Capital | Params | Trader log |
+|---|---:|---:|---|---|
+| `btc-5m` | BTC 5m only | `$10` | `state/sniper_best_params_5m.json` | `logs/btc_paper_fast_5m.log` |
+| `btc-15m` | BTC 15m only | `$10` | `state/sniper_best_params_15m.json` | `logs/btc_paper_fast_15m.log` |
+
+The launcher applies process-local paper-only sizing overrides (`max_bet_pct=0.35`, `spend_ratio=0.20`) so a `$10` agent can clear Polymarket's practical 5-share minimum. Params files remain separate and frozen; this override is runtime-only.
+
+Check both agents:
+
+```bash
+$PY btc_split_paper_agents.py status
+```
+
+Stop both agents:
+
+```bash
+$PY btc_split_paper_agents.py stop
+```
+
+Restart both agents:
+
+```bash
+$PY btc_split_paper_agents.py restart --duration 21600 --capital-total 20
+```
+
+Custom capital split:
+
+```bash
+$PY btc_split_paper_agents.py start \
+  --duration 21600 \
+  --capital-total 20 \
+  --capital-5m 12 \
+  --capital-15m 8
+```
+
+Enable per-agent in-process FastGA only when you intentionally want each process to optimize its own timeframe:
+
+```bash
+$PY btc_split_paper_agents.py start --duration 21600 --capital-total 20 --fast-ga
+```
+
+Enable paper+real learning for those paper agents:
+
+```bash
+$PY btc_split_paper_agents.py restart \
+  --duration 21600 \
+  --capital-total 20 \
+  --fast-ga \
+  --include-live-training
+```
+
+This still starts paper-only processes. They do not submit orders. The difference is optimizer input: FastGA loads resolved `mode=paper` rows plus resolved `mode=live` fills from the shared journal, filtered to the agent timeframe. Use `--live-trade-weight` if live fills should count less than paper rows.
+
+Default recommendation: leave `--fast-ga` off and let the external optimizer remain the single training authority.
+
+Manual one-agent start examples:
+
+```bash
+# 5m only
+BTC_FAST_GA_ENABLED=0 \
+$PY btc_paper_fast.py \
+  --duration 21600 \
+  --timeframes 5 \
+  --agent-id btc-5m \
+  --capital 10 \
+  --best-params-file /Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/state/sniper_best_params_5m.json \
+  --log-file /Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/logs/btc_paper_fast_5m.log
+
+# 15m only
+BTC_FAST_GA_ENABLED=0 \
+$PY btc_paper_fast.py \
+  --duration 21600 \
+  --timeframes 15 \
+  --agent-id btc-15m \
+  --capital 10 \
+  --best-params-file /Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/state/sniper_best_params_15m.json \
+  --log-file /Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/logs/btc_paper_fast_15m.log
+```
+
+## 5b. Live canary controls — blocked by default
+
+Do not use live mode until `btc_live_go_nogo.py` passes and the latest paper/shadow evidence is profitable on strict CLOB-realistic fills.
+
+Status:
+
+```bash
+$PY btc_split_live_agents.py status
+```
+
+Stop:
+
+```bash
+$PY btc_split_live_agents.py stop
+```
+
+Live start is intentionally harder than paper start. It requires:
+
+- funded `.env.live`,
+- no active `live_trading_disabled.json`,
+- passing GO/NO-GO or an explicit canary override,
+- small bankroll/order caps,
+- enabled circuit breakers.
+
+Example shape for a future tiny 5m canary **after audit only**:
+
+```bash
+BTC_LIVE_OPERATOR_OVERRIDE=AUTHOR_AUTHORIZED_CANARY_5USDC_1USDC_TICKET \
+BTC_LIVE_CANARY_ACK=I_ACCEPT_CANARY_RISK_MAX_5_USDC \
+BTC_LIVE_KILL_SWITCH_OVERRIDE=I_UNDERSTAND_REAL_MONEY_LOSS_RISK \
+$PY btc_split_live_agents.py start \
+  --only 5 \
+  --duration 1800 \
+  --cap-total 5 \
+  --cap-5m 5 \
+  --max-trade-cost 2.65 \
+  --min-spend 2.50 \
+  --max-filled-losses 1 \
+  --max-drawdown 2.75 \
+  --min-wr-trades 4 \
+  --min-wr 0.55 \
+  --min-seconds-left 45
+```
+
+Do **not** pass `--allow-live-param-mutation` unless the goal is an explicit live-risk experiment. Default live auto-improvement is shadow-only; paper agents train, live agents execute fixed audited params.
+
+Journal behavior:
+
+- Both agents append to the shared journal:
+  `/Users/sebastian/MAKAKOO/data/arbitrage-agent/v2/state/intraday_journal.jsonl`
+- Each resolved row includes:
+  - `agent_id`: `btc-5m` or `btc-15m`
+  - `window_tf`: `5` or `15`
+
+Reporting:
+
+```bash
+$PY btc_telegram_reporter.py --print
+```
+
+When split agents are running, the report includes a `Split agents:` section with per-agent PID, run-until, status line, trades, WR, and PnL.
 
 ## 6. Run parallel paper lab
 
@@ -274,6 +455,12 @@ $PY btc_probability_model.py --train
 $PY btc_probability_model.py --eval
 ```
 
+To include resolved live fills in the probability dataset too:
+
+```bash
+$PY btc_prob_dataset.py --include-live
+```
+
 Model output:
 
 ```bash
@@ -357,8 +544,9 @@ ps -axo pid,ppid,pgid,stat,etime,command \
 
 ## 13. Operator rules
 
-- Do not run `btc_sniper_live.py` unless a separate reviewed live-canary procedure exists and gates are green.
+- Default mode is paper validation. If Sebastian explicitly authorizes live-money agents, do not stop them automatically; keep split paper validation running beside live canaries.
+- Do not run or modify `btc_sniper_live.py` casually. Treat live-money launch/stop/size changes as explicit operator actions.
 - Do not commit runtime logs, journals, model pickles, PID files, lock files, or `.env.live`.
 - Use `btc_live_go_nogo.py` and `btc_trading_gym.py` before any canary discussion.
 - If a report says `KEEP_TRAINING`, continue paper validation.
-- If a report says `NO_GO`, do not trade real money.
+- If a report says `NO_GO`, treat it as a hard risk warning unless Sebastian explicitly overrides it for a controlled live canary.

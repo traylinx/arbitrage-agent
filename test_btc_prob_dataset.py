@@ -63,6 +63,35 @@ class ProbabilityDatasetTests(unittest.TestCase):
             self.assertTrue(trades[0]["_source_journal"].endswith("intraday_journal.jsonl"))
             self.assertEqual(trades[0]["_source_line"], 1)
 
+    def test_load_journal_trades_can_opt_into_live_fills(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "intraday_journal.jsonl"
+            paper = {
+                "mode": "paper",
+                "won": True,
+                "direction": "Up",
+                "window_start": 1,
+                "window_tf": 5,
+                "placed_at": "paper-t",
+            }
+            live = {
+                "mode": "live",
+                "won": False,
+                "direction": "Down",
+                "window_start": 2,
+                "window_tf": 15,
+                "placed_at": "live-t",
+            }
+            p.write_text(json.dumps(paper) + "\n" + json.dumps(live) + "\n")
+
+            default_trades = ds.load_journal_trades_from_sources([p], include_live=False)
+            live_trades = ds.load_journal_trades_from_sources([p], include_live=True)
+
+            self.assertEqual([t["mode"] for t in default_trades], ["paper"])
+            self.assertEqual([t["mode"] for t in live_trades], ["paper", "live"])
+            self.assertEqual(ds.dataset_key_from_trade(live_trades[1])[0], "source")
+            self.assertEqual(ds.dataset_key_from_trade({**live, "market_id": None})[0], "live")
+
     def test_journal_poly_price_prefers_pretrade_prob_features(self):
         trade = {"poly_price": 0.35, "prob_features": {"poly_price_enter": 0.61}}
         self.assertAlmostEqual(ds.journal_poly_price_for_features(trade), 0.61)
