@@ -9,6 +9,8 @@ Default supported mode: **paper trading with real market data and no real orders
 - [Update summary](docs/TRADING_APP_UPDATE_SUMMARY.md)
 - [User manual](docs/TRADING_APP_USER_MANUAL.md)
 - [Use cases](docs/TRADING_APP_USE_CASES.md)
+- [Architecture/root-cause audit, 2026-05-08](docs/TRADING_APP_ARCHITECTURE_AUDIT_2026-05-08.md)
+- [Changelog](CHANGELOG.md)
 
 ## Fast status
 
@@ -17,6 +19,7 @@ cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
 PY=/usr/local/opt/python@3.11/bin/python3.11
 $PY btc_live_go_nogo.py
 $PY btc_trading_gym.py
+$PY btc_decision_audit.py --hours 36 --limit 12
 $PY btc_telegram_reporter.py --print
 ```
 
@@ -57,6 +60,7 @@ The May 8 live canary lost money. The app now fails closed:
 
 - `btc_split_live_agents.py stop` arms the live kill switch and cancels CLOB open orders.
 - Live agents stop automatically after configured filled-loss, drawdown, or WR-floor breaches.
+- Live external confirmation now fails closed when derivatives context is stale or both Coinalyze and CoinGlass are unavailable.
 - Live agents do **not** mutate params by default. Auto-improvement is paper/shadow-only unless `--allow-live-param-mutation` is explicitly passed.
 - Status prints strict filled-journal WR/PnL separately from raw in-memory counters.
 - Entry path never uses the slow balance-retry loop; it rechecks seconds-left immediately before posting an order.

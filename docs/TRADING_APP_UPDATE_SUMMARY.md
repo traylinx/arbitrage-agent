@@ -39,9 +39,42 @@ BTC_LIVE_MAX_DRAWDOWN_USDC=2.75
 BTC_LIVE_MIN_WR_TRADES=4
 BTC_LIVE_MIN_WR=0.55
 BTC_LIVE_ALLOW_PARAM_MUTATION=0
+BTC_LIVE_MAX_EXTERNAL_AGE_SEC=75
+BTC_LIVE_REQUIRE_PREMIUM_DERIVATIVE_FEED=1
 ```
 
 Operator implication: live canary is no longer a "let it run and see" process. If it fails early, it stops itself and requires a fresh audit before restart.
+
+## 2026-05-08 architecture audit and loss-analysis patch
+
+Audit command:
+
+```bash
+cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
+PY=/usr/local/opt/python@3.11/bin/python3.11
+$PY btc_decision_audit.py --hours 36 --limit 12
+```
+
+Audit result from the May 8 loss window:
+
+- Live strict filled: `11` trades, `4W / 7L`, `36.4% WR`, `-$7.68`.
+- 5m live: `10` trades, `3W / 7L`, `30.0% WR`, `-$9.63`.
+- Recent paper/lab: `1851` trades, `858W / 993L`, `46.4% WR`, `-$757.55` fake.
+- `>180s` external-data-age bucket in live: `0W / 3L`, `-$7.65`.
+- Filled live rows with provider summary had Coinalyze `0/8` and CoinGlass `0/8`.
+
+Root-cause doc:
+
+- `docs/TRADING_APP_ARCHITECTURE_AUDIT_2026-05-08.md`
+
+Code changes:
+
+- Added `btc_decision_audit.py`, a read-only audit tool for live/paper journals.
+- Live external vote now rejects stale context by default, `BTC_LIVE_MAX_EXTERNAL_AGE_SEC=75`.
+- Live external vote now rejects GO when both Coinalyze and CoinGlass are unavailable by default.
+- Added regression tests for both guards.
+
+Hard architecture finding: the live path was not the same as the richer paper/model path. Live used a legacy BTC-delta heuristic plus hand-weighted external confirmation. Paper/lab had richer features and executable CLOB simulation. Next P0 is one shared decision engine.
 
 ## Current readiness state
 
@@ -394,6 +427,8 @@ Runtime artifacts should not be committed:
 ## Bottom line
 
 We built a serious paper-validation and research stack. We did not prove live edge yet; live fills are now first-class opt-in evidence for analysis instead of being ignored by training.
+
+After the May 8 audit, the stricter statement is: do not restart live until the P0 shared decision engine exists and passes validation on unique, de-duplicated market windows. The old live path was not a calibrated probability engine.
 
 The app is ready for:
 

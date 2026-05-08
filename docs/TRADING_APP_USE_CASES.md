@@ -298,3 +298,40 @@ Behavior:
 - Paper agents and labs may auto-improve.
 - Live agents score/journal outcomes but do not mutate params by default.
 - Live mutation requires explicit `--allow-live-param-mutation` and should be treated as a separate live-risk experiment.
+
+### UC-DECISION-AUDIT — explain why the bot won or lost
+
+Goal: audit live/paper decisions from journals without starting any process or touching the wallet.
+
+Command:
+
+```bash
+cd /Users/sebastian/MAKAKOO/plugins/agent-arbitrage-agent/src
+PY=/usr/local/opt/python@3.11/bin/python3.11
+$PY btc_decision_audit.py --hours 36 --limit 12
+```
+
+Expected result:
+
+- live WR/PnL by parameter, direction, timeframe, and external-data age,
+- provider availability summary,
+- paper/lab WR/PnL by strategy family,
+- `MODEL_DOWN`/exploration counts,
+- duplicated market windows so swarm evidence is not misread as independent evidence.
+
+### UC-EXTERNAL-FRESHNESS-GATE — block stale or incomplete data
+
+Goal: prevent live GO decisions based on old derivatives context or missing premium aggregate feeds.
+
+Defaults:
+
+```bash
+BTC_LIVE_MAX_EXTERNAL_AGE_SEC=75
+BTC_LIVE_REQUIRE_PREMIUM_DERIVATIVE_FEED=1
+```
+
+Expected result:
+
+- external context older than `75s` rejects live GO,
+- live GO rejects if both Coinalyze and CoinGlass are unavailable,
+- public-source-only context can still be used for paper/shadow learning, but not as live confirmation by default.

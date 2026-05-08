@@ -88,8 +88,14 @@ Runtime data directories are created automatically under:
 
 - `btc_trading_gym.py` — full readiness/gym score.
 - `btc_live_go_nogo.py` — strict canary promotion gate.
+- `btc_decision_audit.py` — read-only post-loss/decision audit over live and paper journals.
 - `btc_telegram_reporter.py` — Telegram/print status report.
 - `readiness_monitor.py` — periodic readiness monitoring.
+
+### Documentation
+
+- `docs/TRADING_APP_ARCHITECTURE_AUDIT_2026-05-08.md` — root-cause audit for the May 8 live loss and paper/lab regression.
+- `CHANGELOG.md` — operator-facing change history.
 
 ## 3. Fast status commands
 
@@ -117,6 +123,12 @@ Run strict live canary gate:
 
 ```bash
 $PY btc_live_go_nogo.py
+```
+
+Run read-only decision/loss audit:
+
+```bash
+$PY btc_decision_audit.py --hours 36 --limit 12
 ```
 
 Check running trading processes:
@@ -310,6 +322,8 @@ Live start is intentionally harder than paper start. It requires:
 - funded `.env.live`,
 - no active `live_trading_disabled.json`,
 - passing GO/NO-GO or an explicit canary override,
+- fresh external context, default max age `75s`,
+- at least one premium derivatives feed active, Coinalyze or CoinGlass,
 - small bankroll/order caps,
 - enabled circuit breakers.
 
@@ -334,6 +348,15 @@ $PY btc_split_live_agents.py start \
 ```
 
 Do **not** pass `--allow-live-param-mutation` unless the goal is an explicit live-risk experiment. Default live auto-improvement is shadow-only; paper agents train, live agents execute fixed audited params.
+
+Default live external-data guards:
+
+```bash
+BTC_LIVE_MAX_EXTERNAL_AGE_SEC=75
+BTC_LIVE_REQUIRE_PREMIUM_DERIVATIVE_FEED=1
+```
+
+If external context is older than the max age, or both Coinalyze and CoinGlass are unavailable, live GO is rejected.
 
 Journal behavior:
 
@@ -429,6 +452,8 @@ PY
 ```
 
 Keys live in keyring and are read through `makakoo secret get ...` where needed.
+
+For live trading, provider health matters as much as feature values. Missing data is not edge. If Coinalyze and CoinGlass are both down, live trading should stay blocked.
 
 ## 9. Train probability model
 
