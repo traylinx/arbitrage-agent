@@ -77,6 +77,52 @@ class LiveSafetyTests(unittest.TestCase):
         fast_refresh.assert_called()
         sniper._client.place_order.assert_called_once()
 
+    def test_external_vote_rejects_stale_context(self):
+        sniper = m.LiveSniper(m.SniperParams(), live=False)
+        with mock.patch.object(m, "LIVE_MAX_EXTERNAL_AGE_SEC", 75), mock.patch.object(
+            m, "LIVE_REQUIRE_EXTERNAL_CONTEXT", True
+        ), mock.patch.object(
+            sniper,
+            "_external_context",
+            return_value={
+                "ok": 1,
+                "cache_age_sec": 239,
+                "ca_ok": 1,
+                "cg_ok": 1,
+                "bn_ok": 1,
+                "by_ok": 1,
+                "bg_ok": 1,
+                "hl_ok": 1,
+                "external_bull_score": -0.2,
+            },
+        ):
+            ok, conf, reason, _ = sniper._external_vote("Down", 0.9)
+        self.assertFalse(ok)
+        self.assertIn("stale", reason)
+
+    def test_external_vote_requires_premium_derivatives_feed_for_live(self):
+        sniper = m.LiveSniper(m.SniperParams(), live=False)
+        with mock.patch.object(m, "LIVE_MAX_EXTERNAL_AGE_SEC", 75), mock.patch.object(
+            m, "LIVE_REQUIRE_EXTERNAL_CONTEXT", True
+        ), mock.patch.object(m, "LIVE_REQUIRE_PREMIUM_DERIVATIVE_FEED", True), mock.patch.object(
+            sniper,
+            "_external_context",
+            return_value={
+                "ok": 1,
+                "cache_age_sec": 10,
+                "ca_ok": 0,
+                "cg_ok": 0,
+                "bn_ok": 1,
+                "by_ok": 1,
+                "bg_ok": 1,
+                "hl_ok": 1,
+                "external_bull_score": 0.2,
+            },
+        ):
+            ok, conf, reason, _ = sniper._external_vote("Up", 0.9)
+        self.assertFalse(ok)
+        self.assertIn("premium derivatives", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

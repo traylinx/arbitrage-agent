@@ -66,6 +66,8 @@ MAX_TRADE_COST = float(os.environ.get("BTC_MAX_TRADE_COST", "3.00"))
 STOP_AFTER_FIRST_LOSS = os.environ.get("BTC_STOP_AFTER_FIRST_LOSS", "0") == "1"
 MIN_SECONDS_LEFT = float(os.environ.get("BTC_MIN_SECONDS_LEFT", "90"))
 LIVE_REQUIRE_EXTERNAL_CONTEXT = os.environ.get("BTC_LIVE_REQUIRE_EXTERNAL_CONTEXT", "1") == "1"
+LIVE_MAX_EXTERNAL_AGE_SEC = float(os.environ.get("BTC_LIVE_MAX_EXTERNAL_AGE_SEC", "75"))
+LIVE_REQUIRE_PREMIUM_DERIVATIVE_FEED = os.environ.get("BTC_LIVE_REQUIRE_PREMIUM_DERIVATIVE_FEED", "1") == "1"
 LIVE_MAX_FILLED_LOSSES = int(os.environ.get("BTC_LIVE_MAX_FILLED_LOSSES", "2"))
 LIVE_MAX_DRAWDOWN_USDC = float(os.environ.get("BTC_LIVE_MAX_DRAWDOWN_USDC", "2.75"))
 LIVE_MIN_WR_TRADES = int(os.environ.get("BTC_LIVE_MIN_WR_TRADES", "4"))
@@ -1341,8 +1343,15 @@ class LiveSniper:
             1 for k in ("ca_ok", "cg_ok", "bn_ok", "by_ok", "bg_ok", "hl_ok")
             if self._f(ctx, k) > 0
         )
+        age = self._f(ctx, "cache_age_sec", self._now() - self._f(ctx, "fetched_at", self._now()))
         if not ctx or self._f(ctx, "ok") <= 0 or providers_ok < 2:
             reason = f"NO_GO external context missing/weak providers_ok={providers_ok} {ctx.get('error','') if isinstance(ctx, dict) else ''}"
+            return (not LIVE_REQUIRE_EXTERNAL_CONTEXT), base_conf, reason, ctx
+        if LIVE_MAX_EXTERNAL_AGE_SEC > 0 and age > LIVE_MAX_EXTERNAL_AGE_SEC:
+            reason = f"NO_GO external context stale age={age:.0f}s > max={LIVE_MAX_EXTERNAL_AGE_SEC:.0f}s"
+            return (not LIVE_REQUIRE_EXTERNAL_CONTEXT), base_conf, reason, ctx
+        if LIVE_REQUIRE_PREMIUM_DERIVATIVE_FEED and self._f(ctx, "ca_ok") <= 0 and self._f(ctx, "cg_ok") <= 0:
+            reason = "NO_GO premium derivatives feeds unavailable ca_ok=0 cg_ok=0"
             return (not LIVE_REQUIRE_EXTERNAL_CONTEXT), base_conf, reason, ctx
 
         ext_score = self._f(ctx, "external_bull_score")
