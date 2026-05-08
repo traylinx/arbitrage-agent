@@ -13,6 +13,7 @@ All notable operator-facing changes for the BTC Polymarket trading app.
   - Reports `MODEL_DOWN` exploration usage.
   - Reports duplicated market windows so parallel swarms do not fake independent evidence.
 - Added `docs/TRADING_APP_ARCHITECTURE_AUDIT_2026-05-08.md`, the root-cause audit for the May 8 loss.
+- Added `docs/TRADING_APP_POSTMORTEM_ACTION_PLAN_2026-05-08.md`, the explicit what-was-wrong / what-improved / what-remains action plan.
 - Added documentation links from `README.md` to the audit doc and this changelog.
 - Added user-manual instructions for running the decision audit.
 

@@ -67,6 +67,10 @@ Root-cause doc:
 
 - `docs/TRADING_APP_ARCHITECTURE_AUDIT_2026-05-08.md`
 
+Postmortem/action-plan doc:
+
+- `docs/TRADING_APP_POSTMORTEM_ACTION_PLAN_2026-05-08.md`
+
 Code changes:
 
 - Added `btc_decision_audit.py`, a read-only audit tool for live/paper journals.

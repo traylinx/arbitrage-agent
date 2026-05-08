@@ -10,6 +10,7 @@ Default supported mode: **paper trading with real market data and no real orders
 - [User manual](docs/TRADING_APP_USER_MANUAL.md)
 - [Use cases](docs/TRADING_APP_USE_CASES.md)
 - [Architecture/root-cause audit, 2026-05-08](docs/TRADING_APP_ARCHITECTURE_AUDIT_2026-05-08.md)
+- [Postmortem/action plan, 2026-05-08](docs/TRADING_APP_POSTMORTEM_ACTION_PLAN_2026-05-08.md)
 - [Changelog](CHANGELOG.md)
 
 ## Fast status
