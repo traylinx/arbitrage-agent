@@ -94,7 +94,7 @@ def ai_suggest_params(stats, recent_trades):
         line = "  %s | %s | entry=%.4f exit=%.4f pnl=$%.4f | %s (%ds)" % (how, side, ep, xp, pnl, res, dur)
         lines.append(line)
     if not lines:
-        lines = ["  (no trades yet"]
+        lines = ["  (no trades yet)"]
 
     prompt_lines = [
         "You are a quant analyzing a Polymarket BTC momentum strategy.",
@@ -112,7 +112,7 @@ def ai_suggest_params(stats, recent_trades):
         'Return ONLY JSON: {"window":20,"mom_th":0.1,"vol_th":0.1,',
         '"stop_loss_pct":2.0,"take_profit_pct":3.0,"size_pct":0.1,',
         '"max_hold_secs":600,"allow_breakout":true,"allow_breakdown":true,',
-        '"allow_dip_buy":true,"allow_rip_sell":false,"reasoning":"one sentence",
+        '"allow_dip_buy":true,"allow_rip_sell":false,"reasoning":"one sentence"}',
     ]
 
     prompt = "\n".join(prompt_lines)
