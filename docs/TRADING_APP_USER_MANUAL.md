@@ -31,6 +31,21 @@ This does three things:
 2. cancels current CLOB open orders best-effort,
 3. stops split live-agent processes.
 
+
+## 0a. Current standalone release
+
+The deployable V2 repo of truth is now:
+
+```text
+/Users/sebastian/Projects/agent-arbitrage-agent
+https://github.com/makakoo/agent-arbitrage-agent
+https://github.com/makakoo/agent-arbitrage-agent/releases/tag/v0.18.0
+```
+
+Use that repo for new-server deployment, `live_shadow`, `autoimprove_shadow`, `shadow_lane_scoreboard`, `live_go_no_go`, and `live_preflight`.
+
+This workspace plugin path remains useful for legacy BTC operator tools, audits, and historical journal-based safety checks. Do not treat it as the primary deployable release.
+
 ## 1. Requirements
 
 Preferred Python:

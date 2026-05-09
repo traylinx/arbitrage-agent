@@ -4,6 +4,31 @@ Generated: 2026-05-08
 Scope: BTC-only Polymarket 5-minute and 15-minute markets.
 Default mode: paper trading with real market data and no real orders.
 
+
+## 2026-05-10 standalone release and documentation sync
+
+Current deployable repo of truth:
+
+```text
+/Users/sebastian/Projects/agent-arbitrage-agent
+https://github.com/makakoo/agent-arbitrage-agent
+Release: https://github.com/makakoo/agent-arbitrage-agent/releases/tag/v0.18.0
+```
+
+What changed in the standalone release:
+
+- final read-only `live_preflight` before any future live canary
+- explicit `LIVE_ORDER_PLACEMENT_IMPLEMENTED=false` safety flag
+- stricter live GO/NO_GO defaults
+- lane scoreboard refuses to rank taker/maker candidates without taker/maker evidence
+- Gamma market tradability check now fails closed when markets are not accepting orders or are closed/archived
+- end-to-end `docs/USER_MANUAL.md` added
+
+Legacy workspace repo status:
+
+- V2 decision-engine scaffold files are now committed here too for continuity.
+- New live-money deployment should still use the standalone repo, not this legacy plugin path.
+
 ## 2026-05-08 live canary postmortem and fix
 
 Status: **all BTC live/paper trading processes stopped** and live kill switch armed.

@@ -4,6 +4,21 @@ BTC-only Polymarket 5-minute / 15-minute trading research stack.
 
 Default supported mode: **paper trading with real market data and no real orders**.
 
+
+## 2026-05-10 standalone release
+
+Current deployable repo of truth:
+
+```text
+/Users/sebastian/Projects/agent-arbitrage-agent
+https://github.com/makakoo/agent-arbitrage-agent
+Release: https://github.com/makakoo/agent-arbitrage-agent/releases/tag/v0.18.0
+```
+
+Use the standalone repo for new-server deployment and V2 paper-shadow/live-readiness work. This workspace plugin remains the legacy operator repo with BTC paper/live safety tooling and historical audit docs.
+
+Important current rule: **paper validation only**. Real-money live execution is blocked until strict GO/NO_GO + live-preflight gates pass and a non-stub live executor exists.
+
 ## Docs
 
 - [Update summary](docs/TRADING_APP_UPDATE_SUMMARY.md)

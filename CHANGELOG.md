@@ -2,6 +2,35 @@
 
 All notable operator-facing changes for the BTC Polymarket trading app.
 
+
+## 2026-05-10
+
+### Added
+
+- Added V2 ML decision-engine scaffold files to the legacy workspace repo:
+  - `decision_engine.py`
+  - `features/`
+  - `scripts/backfill_*`
+  - `scripts/live_shadow.py`
+  - `test_decision_engine.py`
+- Documented the standalone deployable repo and `v0.18.0` release link in `README.md`, `docs/TRADING_APP_USER_MANUAL.md`, and `docs/TRADING_APP_UPDATE_SUMMARY.md`.
+
+### Current release of truth
+
+- Standalone repo: `https://github.com/makakoo/agent-arbitrage-agent`
+- Release: `https://github.com/makakoo/agent-arbitrage-agent/releases/tag/v0.18.0`
+- Safety: paper-only until strict GO/NO_GO + live-preflight pass and live executor is implemented.
+
+### Validation
+
+```bash
+/usr/local/opt/python@3.11/bin/python3.11 -m compileall -q decision_engine.py features scripts test_decision_engine.py
+/usr/local/opt/python@3.11/bin/python3.11 -m pytest -q \
+  test_decision_engine.py features/test_external_metrics_loader.py scripts/test_backfill_btc_markets.py
+```
+
+Result: `45 passed`.
+
 ## 2026-05-08
 
 ### Added
